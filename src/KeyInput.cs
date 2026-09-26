@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using MelonLoader;
 
@@ -115,12 +114,14 @@ internal sealed class KeyInput
 
     private string? TrySetupLegacy()
     {
-        try { return UnityApi.TryParseKey(_keyName, out _legacyKey) ? null : "'" + _keyName + "' is not a KeyCode name"; }
+        try
+        {
+            if (!UnityApi.TryParseKey(_keyName, out _legacyKey)) return "'" + _keyName + "' is not a KeyCode name";
+            return UnityApi.LegacyInputProblem();
+        }
         catch (Exception e) { return e.GetBaseException().Message; }
     }
 
-    // Separate, non-inlined method: if the game has no InputLegacyModule, only this method fails to compile.
-    [MethodImpl(MethodImplOptions.NoInlining)]
     private static bool LegacyDown(int key) => UnityApi.KeyDown(key);
 
     // ---- Input System package, by reflection ----------------------------------------------------------------------
@@ -164,16 +165,7 @@ internal sealed class KeyInput
         return _wasPressed != null && _wasPressed.GetValue(control) is true;
     }
 
-    private static Type? FindType(string fullName, string assemblyName)
-    {
-        foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
-        {
-            var t = a.GetType(fullName, false);
-            if (t != null) return t;
-        }
-        try { return Assembly.Load(assemblyName).GetType(fullName, false); } // MelonLoader's resolver finds interop assemblies
-        catch { return null; }
-    }
+    private static Type? FindType(string fullName, string assemblyName) => UnityApi.FindType(fullName, assemblyName);
 
     // ---- Windows key state ----------------------------------------------------------------------------------------
 

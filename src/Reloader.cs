@@ -4,9 +4,6 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-#if !MONO
-using System.Runtime.Loader;
-#endif
 using MelonLoader;
 using MelonLoader.Utils;
 
@@ -16,8 +13,8 @@ namespace HotReload;
 /// Reloads a group of assemblies: the one whose file changed, the loaded mods that reference it, and (optionally) the
 /// stateful helper libraries those mods use, so every reloaded mod starts on fresh library state. The group is taken
 /// down dependents-first (state handoff saved, melons unregistered, patches removed, old build retired, preference
-/// categories and injected class names released) and brought up libraries-first, each new build in its own
-/// AssemblyLoadContext. Old assemblies are never unloaded; each reload costs the DLLs' size in memory.
+/// categories and injected class names released) and brought up libraries-first: on IL2CPP each new build in its own
+/// AssemblyLoadContext, on Mono under a unique assembly name. Old assemblies are never unloaded; each reload costs the DLLs' size in memory.
 /// </summary>
 internal sealed class Reloader
 {
@@ -100,15 +97,16 @@ internal sealed class Reloader
         if (!TryRead(path, out var bytes)) return Result.NotReady;
         if (!AssemblyMeta.TryInspect(bytes, out var name, out bool isMelon)) return Result.NotReady; // partially written or not .NET
 
+        if (_isIgnored(name) && name != _selfName) return Result.Skipped;
+
+        var hash = Compat.Sha256Hex(bytes);
+        if (_hash.TryGetValue(name, out var known) && known == hash) return Result.Unchanged;
         if (name == _selfName)
         {
             if (_warnedOnce.Add(name)) _log.Msg("HotReload itself changed; restart the game to use the new build.");
             return Result.Skipped;
         }
         if (_isIgnored(name)) return Result.Skipped;
-
-        var hash = Compat.Sha256Hex(bytes);
-        if (_hash.TryGetValue(name, out var known) && known == hash) return Result.Unchanged;
         if (!isMelon && !IsLibrary(name))
         {
             _hash[name] = hash;
@@ -275,15 +273,15 @@ internal sealed class Reloader
     private Assembly LoadNewBuild(Item it, byte[]? pdb)
     {
         int gen = ++_generation;
-#if MONO
-        var current = Latest.ToDictionary(kv => kv.Key, kv => kv.Value.GetName().Name!, StringComparer.OrdinalIgnoreCase);
-        var (dll, newPdb) = AssemblyMeta.Rename(it.Bytes, pdb, AsmNames.Unique(it.Name, gen), current);
-        return Assembly.LoadFrom(StartupLoader.ShadowCopyForReload(it.Path, dll, newPdb, gen));
-#else
-        var ctx = new ModLoadContext(it.Name + " #" + gen);
-        try { return ctx.LoadFromAssemblyPath(StartupLoader.ShadowCopyForReload(it.Path, it.Bytes, pdb, gen)); }
-        catch (IOException) { return ctx.LoadFromStream(new MemoryStream(it.Bytes), pdb == null ? null : new MemoryStream(pdb)); }
-#endif
+        if (Compat.IsMono)
+        {
+            var current = Latest.ToDictionary(kv => kv.Key, kv => kv.Value.GetName().Name!, StringComparer.OrdinalIgnoreCase);
+            var (dll, newPdb) = AssemblyMeta.Rename(it.Bytes, pdb, AsmNames.Unique(it.Name, gen), current);
+            return Assembly.LoadFrom(StartupLoader.ShadowCopyForReload(it.Path, dll, newPdb, gen));
+        }
+        var ctx = LoadContexts.Create(it.Name + " #" + gen);
+        try { return LoadContexts.LoadFromPath(ctx, StartupLoader.ShadowCopyForReload(it.Path, it.Bytes, pdb, gen)); }
+        catch (IOException) { return LoadContexts.LoadFromStream(ctx, new MemoryStream(it.Bytes), pdb == null ? null : new MemoryStream(pdb)); }
     }
 
     /// <summary>
@@ -333,11 +331,9 @@ internal sealed class Reloader
     {
         var parts = new List<string>();
         // Classes whose instances the game drives directly: injected Il2Cpp classes, or MonoBehaviours on Mono.
-#if MONO
-        var injected = oldAssemblies.SelectMany(UnityApi.ComponentTypesIn).ToList();
-#else
-        var injected = oldAssemblies.SelectMany(InjectedTypes.InjectedIn).ToList();
-#endif
+        var injected = Compat.IsMono
+            ? oldAssemblies.SelectMany(UnityApi.ComponentTypesIn).ToList()
+            : oldAssemblies.SelectMany(InjectedTypes.InjectedIn).ToList();
         if (_destroyOld())
         {
             int destroyed = UnityApi.DestroyPersistentObjects(name, _log);
@@ -361,14 +357,12 @@ internal sealed class Reloader
                     if (retired + failed > 0) parts.Add("retired " + retired + " old method(s)" + (failed > 0 ? " (" + failed + " failed)" : "") + " in " + ms + " ms");
                 }
         }
-#if !MONO
-        // The new build registers classes with the same names; Il2CppInterop would refuse them otherwise.
-        if (injected.Count > 0)
+        // IL2CPP: the new build registers classes with the same names; Il2CppInterop would refuse them otherwise.
+        if (!Compat.IsMono && injected.Count > 0)
         {
             int released = InjectedTypes.Release(injected, _log);
             if (released > 0) parts.Add("released " + released + " injected class name(s)");
         }
-#endif
         if (parts.Count > 0) _log.Msg(name + ": " + string.Join("; ", parts) + ".");
     }
 
@@ -509,22 +503,3 @@ internal static class LoaderFolders
         return MelonFolders().Any(d => string.Equals(d.TrimEnd('\\', '/'), dir.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase));
     }
 }
-
-#if !MONO
-/// <summary>One per reload. Dependencies resolve to the newest reloaded build of a mod, else to whatever the default context has.</summary>
-internal sealed class ModLoadContext : AssemblyLoadContext
-{
-    public ModLoadContext(string name) : base("HotReload: " + name, isCollectible: false) { }
-
-    protected override Assembly? Load(AssemblyName assemblyName)
-    {
-        var n = assemblyName.Name;
-        if (n == null) return null;
-        if (Reloader.Latest.TryGetValue(n, out var reloaded)) return reloaded;
-        foreach (var a in Default.Assemblies)
-            if (string.Equals(a.GetName().Name, n, StringComparison.OrdinalIgnoreCase)) return a;
-        try { return Default.LoadFromAssemblyName(assemblyName); } // runs MelonLoader's resolvers (Il2Cpp interop, UserLibs)
-        catch { return null; }
-    }
-}
-#endif

@@ -1,8 +1,10 @@
 <Project>
-  <!-- Copy to Local.props (git-ignored) and point GameDir at a game with MelonLoader installed and started once. -->
+  <!-- Copy to Local.props (git-ignored). Both entries are optional for HotReload itself (it builds from NuGet): a build is
+       copied into the Plugins folder of every game set here. The test fixtures in tests/ need them to compile. -->
   <PropertyGroup>
+    <!-- An IL2CPP game with MelonLoader installed and started once (tests/ fixtures). -->
     <GameDir>C:\Program Files (x86)\Steam\steamapps\common\YourGame</GameDir>
-    <!-- Only for the Mono build (mono/HotReload.Mono.csproj): a Mono Unity game with MelonLoader. -->
+    <!-- A Mono game with MelonLoader (tests/mono/ fixtures). -->
     <MonoGameDir>C:\Program Files (x86)\Steam\steamapps\common\YourMonoGame</MonoGameDir>
   </PropertyGroup>
 </Project>

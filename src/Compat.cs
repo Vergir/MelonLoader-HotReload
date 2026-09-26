@@ -10,23 +10,16 @@ using Mono.Cecil;
 namespace HotReload;
 
 /// <summary>
-/// The few runtime APIs that differ between the IL2CPP build (.NET 6) and the Mono build (.NET Framework 4.7.2 API,
-/// running on Unity's Mono).
+/// The runtime HotReload runs on. It is one net472 DLL: in IL2CPP games MelonLoader runs it on .NET 6, in Mono games
+/// on Unity's Mono. Code that differs between the two branches on <see cref="IsMono"/> at runtime.
 /// </summary>
 internal static class Compat
 {
-#if MONO
-    public const bool IsMono = true;
-#else
-    public const bool IsMono = false;
-#endif
+    /// <summary>True in Mono games, false in IL2CPP games (.NET 6).</summary>
+    public static readonly bool IsMono = !MelonLoader.MelonUtils.IsGameIl2Cpp();
 
-    public static int ProcessId =>
-#if MONO
-        System.Diagnostics.Process.GetCurrentProcess().Id;
-#else
-        Environment.ProcessId;
-#endif
+    private static int _pid;
+    public static int ProcessId => _pid != 0 ? _pid : _pid = System.Diagnostics.Process.GetCurrentProcess().Id;
 
     public static bool IsWindows => Environment.OSVersion.Platform == PlatformID.Win32NT;
 

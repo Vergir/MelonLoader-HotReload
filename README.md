@@ -5,7 +5,7 @@ MelonLoader plugin for mod authors: rebuild a mod and the running game picks it 
 
 | | |
 |---|---|
-| Games | IL2CPP and Mono, as two builds of the same source: `HotReload.dll` for IL2CPP (.NET 6) and the Mono build (`mono/`, .NET Framework 4.7.2 API). MelonLoader refuses each build in the other kind of game. |
+| Games | IL2CPP and Mono, with one `HotReload.dll` (.NET Framework 4.7.2 API): it runs on the .NET 6 runtime MelonLoader uses in IL2CPP games and on Unity's Mono (Unity 2018.1 or newer, the .NET 4.x scripting runtime). |
 | MelonLoader | 0.6.0 or newer. Every API it uses exists in the 0.6.0-0.7.3 release binaries. Shadow-copying `Mods/` needs 0.7.1+; on older versions mod DLLs stay locked and builds need the rename-then-copy deploy step below. |
 | Tested in-game (IL2CPP) | MelonLoader 0.7.3 in No Rest for the Wicked (Unity 6000.1, .NET 6.0.16), 2026-09-26: own test mods, MoreAspectRatios, NRftW Item Manager, UnityExplorer 4.13.2 with UniverseLib. |
 | Tested in-game (Mono) | MelonLoader 0.7.3 in PEAK (Unity 6000.3, Mono 6.13), 2026-09-26: own test mods (library, Mods subfolder, plugin, MonoBehaviour, state handoff), UnityExplorer 4.13.6 Mono with UniverseLib (reloads as far as it starts in that game). |
@@ -160,20 +160,24 @@ over. `HRTestDependent` references it and deploys into the manifest subfolder `M
 
 ## Building
 
-HotReload and the test mods compile against the MelonLoader and Il2Cpp interop assemblies of an installed game. Point the
-build at one (MelonLoader installed and the game started once), in any of these ways:
+HotReload compiles against the `LavaGang.MelonLoader` NuGet package and reaches Unity through reflection, so it builds
+without a game:
 
-* copy `Local.props.example` to `Local.props` (git-ignored) and set `GameDir`;
-* set the `MELONLOADER_GAME_DIR` environment variable;
-* `dotnet build -c Release -p:GameDir="C:\path\to\game"`.
+```bash
+dotnet build -c Release          # bin/Release/HotReload.dll, for Mono and IL2CPP games
+```
 
-The build copies the DLL into `<game>/Plugins` (`-p:DeployToGame=false` to skip). The published DLL works in other
-IL2CPP games too: interop assemblies are bound by name at runtime.
+It targets net472 and compiles against the net35 assemblies of the MelonLoader, HarmonyX and Mono.Cecil packages, the
+oldest copies any game has: MelonLoader runs its net35 build in Mono games, and .NET 6 accepts the newer copies of IL2CPP
+games. Differences between the two runtimes are decided at runtime; on IL2CPP, the load context type each reload needs
+is generated with Reflection.Emit, because net472 has no `AssemblyLoadContext` to subclass.
 
-The Mono build is `mono/HotReload.Mono.csproj`. It compiles the same sources with `MONO` defined against MelonLoader's
-`net35` folder and the game's `<Game>_Data/Managed` Unity modules. Point it at a Mono game with MelonLoader through
-`MonoGameDir` (`Local.props`, `MELONLOADER_MONO_GAME_DIR`, or `-p:MonoGameDir=...`), then `dotnet build mono -c Release`.
-The test fixtures have Mono projects in `tests/mono/`.
+To copy each build into games' `Plugins/` folders, set `GameDir` and/or `MonoGameDir` in `Local.props` (copy
+`Local.props.example`, git-ignored), or use `MELONLOADER_GAME_DIR` / `MELONLOADER_MONO_GAME_DIR` or `-p:GameDir=...`.
+`-p:DeployToGame=false` skips the copy. `pwsh ./package.ps1` builds the release zips into `dist/`.
+
+The test fixtures in `tests/` (and their Mono projects in `tests/mono/`) do need a game: they use real Unity and Il2Cpp
+interop types, so they compile against the game set in `Local.props`.
 
 ## How it works (MelonLoader internals it relies on)
 
@@ -186,7 +190,7 @@ and patches only the game, the runtime and the mods.
 | HotReload is a `MelonPlugin` | It registers before MelonLoader scans `Mods/`, so the shadow copy is in place before any mod loads. No Unity type may appear in its fields; see `UnityApi.cs`. |
 | Shadow copy by editing `MelonFolderHandler._modDirs` (0.7.1+) | MelonLoader loads mods with `LoadFromAssemblyPath`, which locks the file, and PatchShield rules out redirecting that call. The folder list is plain data read later. |
 | Remove the old `MelonAssembly` from the internal `loadedAssemblies` list | `LoadMelonAssembly(path, assembly)` returns the cached entry with the same `FullName`. |
-| One `AssemblyLoadContext` per reload (IL2CPP) | The default context refuses a second assembly with the same name. |
+| One `AssemblyLoadContext` per reload (IL2CPP) | The default context refuses a second assembly with the same name. The context type is emitted at runtime and overrides `Load`, so references resolve to the newest reloaded builds before the default context answers with the old ones. |
 | A unique assembly name per reload, via Mono.Cecil (Mono) | Mono has no load contexts and binds a reference to the first loaded assembly of a name, so a reloaded mod would keep calling the old library. Each reloaded build is renamed `Name__hrN`, its references to other reloaded assemblies are rewritten to their current names, and HotReload strips the suffix wherever it compares names. |
 | `MelonBase.RegisterSorted` | `LoadMelons` only creates melons. |
 | Preference categories found through the old build's fields | `CreateEntry` throws on duplicates. Recording who creates a category would need a hook on MelonLoader, which PatchShield blocks. |

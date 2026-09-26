@@ -1,35 +1,208 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using HarmonyLib;
 using MelonLoader;
-using UnityEngine;
-using UnityEngine.SceneManagement;
 
 namespace HotReload;
 
 /// <summary>
-/// Everything that touches Unity types (Il2Cpp interop types in the IL2CPP build). HotReload is a plugin and registers
-/// before the interop assemblies can be loaded, so no Unity type may appear in a field or signature of the plugin class
-/// itself; these methods are only JIT-compiled once the game runs.
+/// Everything that touches Unity, through reflection. HotReload compiles against no Unity assembly, so it builds without
+/// a game and one DLL works with any Unity version: the types are looked up at runtime in the game's modules (Mono) or
+/// the Il2Cpp interop assemblies (IL2CPP), which carry the same type and member names. Il2CppInterop helpers
+/// (WasCollected, TryCast, Il2CppType.From) are reached the same way and are simply absent on Mono.
+/// Nothing here runs before OnInitializeMelon: the interop assemblies do not exist earlier on IL2CPP.
 /// </summary>
 internal static class UnityApi
 {
     public const int NoKey = 0; // KeyCode.None
+
+    private static readonly string[] CoreModules = { "UnityEngine.CoreModule", "UnityEngine" };
+    private static readonly string[] InputModules = { "UnityEngine.InputLegacyModule", "UnityEngine.CoreModule", "UnityEngine" };
+    private const BindingFlags PublicStatic = BindingFlags.Public | BindingFlags.Static;
+    private const BindingFlags PublicInstance = BindingFlags.Public | BindingFlags.Instance;
+
+    /// <summary>A type by full name from the first of <paramref name="assemblyNames"/> that has it, loading the assembly if needed.</summary>
+    public static Type? FindType(string fullName, params string[] assemblyNames)
+    {
+        foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            string? n;
+            try { n = a.GetName().Name; } catch { continue; }
+            if (n == null || !assemblyNames.Contains(n, StringComparer.OrdinalIgnoreCase)) continue;
+            var t = a.GetType(fullName, false);
+            if (t != null) return t;
+        }
+        foreach (var n in assemblyNames)
+        {
+            try
+            {
+                var t = Assembly.Load(n).GetType(fullName, false); // MelonLoader's resolver finds the interop assemblies
+                if (t != null) return t;
+            }
+            catch { /* not in this game */ }
+        }
+        return null;
+    }
+
+    private static Type Need(string fullName, string[] modules) =>
+        FindType(fullName, modules) ?? throw new InvalidOperationException(fullName + " not found in " + string.Join(" / ", modules));
+
+    private static MethodInfo NeedMethod(Type t, string name, params Type[] args) =>
+        t.GetMethod(name, PublicStatic | BindingFlags.Instance, null, args, null) ?? throw new MissingMethodException(t.FullName, name);
+
+    // ---- Unity members, resolved on first use --------------------------------------------------------------------
+
+    private sealed class Core
+    {
+        public readonly Type Object, GameObject, Component;
+        public readonly Type? ScriptableObject;
+        public readonly MethodInfo Destroy, Exists, FindObjectsOfTypeAll, DontDestroyOnLoad, SceneCount, GetSceneAt;
+        public readonly PropertyInfo ComponentGameObject, SceneIsLoaded, SceneBuildIndex, SceneName;
+
+        public Core()
+        {
+            Object = Need("UnityEngine.Object", CoreModules);
+            GameObject = Need("UnityEngine.GameObject", CoreModules);
+            Component = Need("UnityEngine.Component", CoreModules);
+            ScriptableObject = FindType("UnityEngine.ScriptableObject", CoreModules);
+            Destroy = NeedMethod(Object, "Destroy", Object);
+            DontDestroyOnLoad = NeedMethod(Object, "DontDestroyOnLoad", Object);
+            // implicit operator bool(Object exists): false for destroyed objects, like "if (obj)" in a mod.
+            Exists = Object.GetMethods(PublicStatic).FirstOrDefault(m => m.Name == "op_Implicit" && m.ReturnType == typeof(bool)
+                         && m.GetParameters().Length == 1 && m.GetParameters()[0].ParameterType == Object)
+                     ?? throw new MissingMethodException(Object.FullName, "op_Implicit");
+            var resources = Need("UnityEngine.Resources", CoreModules);
+            // The non-generic overload; its parameter is System.Type on Mono and Il2CppSystem.Type on IL2CPP.
+            FindObjectsOfTypeAll = resources.GetMethods(PublicStatic).FirstOrDefault(m => m.Name == "FindObjectsOfTypeAll" && !m.IsGenericMethod && m.GetParameters().Length == 1)
+                                   ?? throw new MissingMethodException(resources.FullName, "FindObjectsOfTypeAll");
+            ComponentGameObject = Component.GetProperty("gameObject", PublicInstance) ?? throw new MissingMemberException(Component.FullName, "gameObject");
+
+            var sceneManager = Need("UnityEngine.SceneManagement.SceneManager", CoreModules);
+            SceneCount = sceneManager.GetProperty("sceneCount", PublicStatic)?.GetGetMethod() ?? throw new MissingMemberException(sceneManager.FullName, "sceneCount");
+            GetSceneAt = NeedMethod(sceneManager, "GetSceneAt", typeof(int));
+            var scene = GetSceneAt.ReturnType;
+            SceneIsLoaded = scene.GetProperty("isLoaded", PublicInstance) ?? throw new MissingMemberException(scene.FullName, "isLoaded");
+            SceneBuildIndex = scene.GetProperty("buildIndex", PublicInstance) ?? throw new MissingMemberException(scene.FullName, "buildIndex");
+            SceneName = scene.GetProperty("name", PublicInstance) ?? throw new MissingMemberException(scene.FullName, "name");
+        }
+    }
+
+    private static Core? _core;
+    private static Core U => _core ??= new Core();
+
+    /// <summary>Il2CppInterop's object base and helpers; null on Mono.</summary>
+    private sealed class Interop
+    {
+        public readonly Type ObjectBase;
+        public readonly PropertyInfo WasCollected;
+        public readonly MethodInfo TryCast, TypeFrom;
+        private readonly Dictionary<Type, MethodInfo> _casts = new Dictionary<Type, MethodInfo>();
+
+        private Interop(Type objectBase, Type il2CppType)
+        {
+            ObjectBase = objectBase;
+            WasCollected = objectBase.GetProperty("WasCollected", PublicInstance) ?? throw new MissingMemberException(objectBase.FullName, "WasCollected");
+            TryCast = objectBase.GetMethod("TryCast", PublicInstance, null, Type.EmptyTypes, null) ?? throw new MissingMethodException(objectBase.FullName, "TryCast");
+            TypeFrom = il2CppType.GetMethod("From", PublicStatic, null, new[] { typeof(Type) }, null) ?? throw new MissingMethodException(il2CppType.FullName, "From");
+        }
+
+        public static Interop? Find()
+        {
+            var ob = FindType("Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase", "Il2CppInterop.Runtime");
+            var it = FindType("Il2CppInterop.Runtime.Il2CppType", "Il2CppInterop.Runtime");
+            return ob != null && it != null ? new Interop(ob, it) : null;
+        }
+
+        /// <summary>Il2Cpp wrappers carry the declared type (a DontDestroyOnLoad argument is a UnityEngine.Object), so cast to the real one.</summary>
+        public object? Cast(object obj, Type to)
+        {
+            if (!ObjectBase.IsInstanceOfType(obj)) return to.IsInstanceOfType(obj) ? obj : null;
+            if (!_casts.TryGetValue(to, out var m)) _casts[to] = m = TryCast.MakeGenericMethod(to);
+            return m.Invoke(obj, null);
+        }
+    }
+
+    private static bool _interopLooked;
+    private static Interop? _interop;
+    private static Interop? Il2Cpp
+    {
+        get
+        {
+            if (!_interopLooked) { _interopLooked = true; _interop = Compat.IsMono ? null : Interop.Find(); }
+            return _interop;
+        }
+    }
+
+    /// <summary>Whether a Unity object is still alive: not collected on the Il2Cpp side and not destroyed.</summary>
+    private static bool IsAlive(object? obj)
+    {
+        if (obj == null) return false;
+        try
+        {
+            var il2cpp = Il2Cpp;
+            if (il2cpp != null && il2cpp.ObjectBase.IsInstanceOfType(obj) && (bool)il2cpp.WasCollected.GetValue(obj, null)!) return false;
+            return (bool)U.Exists.Invoke(null, new[] { obj })!;
+        }
+        catch { return false; }
+    }
+
+    private static object? As(object obj, Type type)
+    {
+        var il2cpp = Il2Cpp;
+        return il2cpp != null ? il2cpp.Cast(obj, type) : type.IsInstanceOfType(obj) ? obj : null;
+    }
+
+    // ---- Reload key (legacy UnityEngine.Input) --------------------------------------------------------------------
+
+    private static Type? _keyCode;
+    private static MethodInfo? _getKeyDown;
+    private static int _argsKey = -1;
+    private static object[] _args = Array.Empty<object>();
+
+    private static Type KeyCodeType => _keyCode ??= Need("UnityEngine.KeyCode", InputModules);
+
+    /// <summary>Null when legacy input can be used, else why not.</summary>
+    public static string? LegacyInputProblem()
+    {
+        try
+        {
+            var input = FindType("UnityEngine.Input", InputModules);
+            if (input == null) return "the game has no UnityEngine.Input";
+            _getKeyDown = input.GetMethod("GetKeyDown", PublicStatic, null, new[] { KeyCodeType }, null);
+            return _getKeyDown == null ? "Input.GetKeyDown(KeyCode) not found" : null;
+        }
+        catch (Exception e) { return e.GetBaseException().Message; }
+    }
 
     /// <summary>Parses a KeyCode name. Returns false for unknown names.</summary>
     public static bool TryParseKey(string name, out int key)
     {
         key = NoKey;
         if (string.IsNullOrWhiteSpace(name) || name.Trim().Equals("None", StringComparison.OrdinalIgnoreCase)) return true;
-        if (!Enum.TryParse(name.Trim(), true, out KeyCode k)) return false;
-        key = (int)k;
+        object value;
+        try { value = Enum.Parse(KeyCodeType, name.Trim(), ignoreCase: true); }
+        catch (ArgumentException) { return false; }
+        if (!Enum.IsDefined(KeyCodeType, value)) return false; // a bare number that is no KeyCode
+        key = Convert.ToInt32(value);
         return true;
     }
 
-    public static string KeyName(int key) => ((KeyCode)key).ToString();
+    public static string KeyName(int key) => Enum.ToObject(KeyCodeType, key).ToString() ?? key.ToString();
 
-    public static bool KeyDown(int key) => key != NoKey && Input.GetKeyDown((KeyCode)key);
+    /// <summary>Throws when the game disabled legacy input; KeyInput then moves on to the next backend.</summary>
+    public static bool KeyDown(int key)
+    {
+        if (key == NoKey) return false;
+        if (_getKeyDown == null && LegacyInputProblem() is { } problem) throw new InvalidOperationException(problem);
+        if (key != _argsKey) { _args = new[] { Enum.ToObject(KeyCodeType, key) }; _argsKey = key; }
+        try { return (bool)_getKeyDown!.Invoke(null, _args)!; }
+        catch (TargetInvocationException e) when (e.InnerException != null) { throw e.InnerException; }
+    }
+
+    // ---- Scenes ------------------------------------------------------------------------------------------------
 
     /// <summary>
     /// A reloaded mod never saw the scenes that are already open. Replays OnSceneWasLoaded + OnSceneWasInitialized
@@ -38,35 +211,46 @@ internal static class UnityApi
     public static int ReplaySceneEvents(MelonMod mod)
     {
         int n = 0;
-        for (int i = 0; i < SceneManager.sceneCount; i++)
+        foreach (var (buildIndex, name) in LoadedScenes())
         {
-            var scene = SceneManager.GetSceneAt(i);
-            if (!scene.isLoaded) continue;
-            try { mod.OnSceneWasLoaded(scene.buildIndex, scene.name); }
-            catch (Exception e) { mod.LoggerInstance.Error("OnSceneWasLoaded(" + scene.name + ") during hot reload: " + e); }
-            try { mod.OnSceneWasInitialized(scene.buildIndex, scene.name); }
-            catch (Exception e) { mod.LoggerInstance.Error("OnSceneWasInitialized(" + scene.name + ") during hot reload: " + e); }
+            try { mod.OnSceneWasLoaded(buildIndex, name); }
+            catch (Exception e) { mod.LoggerInstance.Error("OnSceneWasLoaded(" + name + ") during hot reload: " + e); }
+            try { mod.OnSceneWasInitialized(buildIndex, name); }
+            catch (Exception e) { mod.LoggerInstance.Error("OnSceneWasInitialized(" + name + ") during hot reload: " + e); }
             n++;
         }
         return n;
     }
 
+    private static List<(int buildIndex, string name)> LoadedScenes()
+    {
+        var u = U;
+        var result = new List<(int, string)>();
+        int count = (int)u.SceneCount.Invoke(null, null)!;
+        var arg = new object[1];
+        for (int i = 0; i < count; i++)
+        {
+            arg[0] = i;
+            var scene = u.GetSceneAt.Invoke(null, arg)!; // boxed struct
+            if (!(bool)u.SceneIsLoaded.GetValue(scene, null)!) continue;
+            result.Add(((int)u.SceneBuildIndex.GetValue(scene, null)!, (string)u.SceneName.GetValue(scene, null)!));
+        }
+        return result;
+    }
+
     // ---- Objects kept across scene loads ------------------------------------------------------------------------
     // Scene objects a mod creates go away with the scene. Objects passed to DontDestroyOnLoad live until destroyed,
     // so after a reload the old build's UI roots, canvases and EventSystems would stay next to the new build's.
-    // DontDestroyOnLoad is only ever called from managed code by mods (the game calls it natively), so a postfix
-    // that looks at the managed stack tells which mod asked.
+    // A postfix that looks at the managed stack tells which mod asked (the game's own calls have no mod on the stack).
 
-    private static readonly Dictionary<string, List<UnityEngine.Object>> Persistent =
-        new Dictionary<string, List<UnityEngine.Object>>(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, List<object>> Persistent = new Dictionary<string, List<object>>(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Needs Il2Cpp support to be set up (OnApplicationStart), and must run before mods' OnInitializeMelon.</summary>
     public static bool InstallPersistentObjectTracking(HarmonyLib.Harmony harmony, MelonLogger.Instance log)
     {
         try
         {
-            var original = AccessTools.Method(typeof(UnityEngine.Object), nameof(UnityEngine.Object.DontDestroyOnLoad), new[] { typeof(UnityEngine.Object) });
-            harmony.Patch(original, postfix: new HarmonyMethod(typeof(UnityApi).GetMethod(nameof(DontDestroyOnLoadPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
+            harmony.Patch(U.DontDestroyOnLoad, postfix: new HarmonyMethod(typeof(UnityApi).GetMethod(nameof(DontDestroyOnLoadPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
             return true;
         }
         catch (Exception e)
@@ -76,13 +260,13 @@ internal static class UnityApi
         }
     }
 
-    private static void DontDestroyOnLoadPostfix(UnityEngine.Object target)
+    private static void DontDestroyOnLoadPostfix(object __0)
     {
-        if (target == null) return;
+        if (__0 == null) return;
         var owner = Callers.FindModAssembly();
         if (owner == null) return;
-        if (!Persistent.TryGetValue(owner, out var list)) Persistent[owner] = list = new List<UnityEngine.Object>();
-        list.Add(target);
+        if (!Persistent.TryGetValue(owner, out var list)) Persistent[owner] = list = new List<object>();
+        list.Add(__0);
     }
 
     /// <summary>Destroys the GameObjects <paramref name="assemblyName"/> passed to DontDestroyOnLoad. Returns how many were alive.</summary>
@@ -95,59 +279,53 @@ internal static class UnityApi
         {
             try
             {
-#if MONO
-                if (obj == null) continue; // already destroyed
-                var go = obj as GameObject ?? (obj as Component)?.gameObject;
-#else
-                if (obj == null || obj.WasCollected) continue; // already destroyed
-                var go = obj.TryCast<GameObject>() ?? obj.TryCast<Component>()?.gameObject;
-#endif
+                if (!IsAlive(obj)) continue; // already destroyed
+                var go = As(obj, U.GameObject) ?? (As(obj, U.Component) is { } c ? U.ComponentGameObject.GetValue(c, null) : null);
                 if (go == null) continue;
-                UnityEngine.Object.Destroy(go);
+                U.Destroy.Invoke(null, new[] { go });
                 n++;
             }
-            catch (Exception e) { log.Warning(assemblyName + ": could not destroy a persistent object: " + e.Message); }
+            catch (Exception e) { log.Warning(assemblyName + ": could not destroy a persistent object: " + (e.InnerException ?? e).Message); }
         }
         return n;
     }
 
-#if MONO
     /// <summary>Mono: the old build's Component / ScriptableObject subclasses, whose instances Unity drives directly.</summary>
-    public static IEnumerable<Type> ComponentTypesIn(System.Reflection.Assembly asm)
+    public static IEnumerable<Type> ComponentTypesIn(Assembly asm)
     {
         Type?[] types;
         try { types = asm.GetTypes(); }
-        catch (System.Reflection.ReflectionTypeLoadException e) { types = e.Types; }
+        catch (ReflectionTypeLoadException e) { types = e.Types; }
+        var u = U;
         foreach (var t in types)
-            if (t != null && !t.ContainsGenericParameters && (typeof(Component).IsAssignableFrom(t) || typeof(ScriptableObject).IsAssignableFrom(t)))
+            if (t != null && !t.ContainsGenericParameters && (u.Component.IsAssignableFrom(t) || (u.ScriptableObject?.IsAssignableFrom(t) ?? false)))
                 yield return t;
     }
-#endif
 
     /// <summary>
     /// Destroys every live Unity object of the old build's classes: injected Il2Cpp classes, or on Mono its Component
     /// and ScriptableObject subclasses. Their GameObjects stay unless the mod also kept them across scenes.
     /// </summary>
-    public static int DestroyInstancesOf(IEnumerable<Type> injectedTypes, MelonLogger.Instance log)
+    public static int DestroyInstancesOf(IEnumerable<Type> types, MelonLogger.Instance log)
     {
         int n = 0;
-        foreach (var t in injectedTypes)
+        var u = U;
+        var il2cpp = Il2Cpp;
+        foreach (var t in types)
         {
-            if (!typeof(UnityEngine.Object).IsAssignableFrom(t)) continue;
+            if (!u.Object.IsAssignableFrom(t)) continue;
             try
             {
-#if MONO
-                foreach (var obj in Resources.FindObjectsOfTypeAll(t))
-#else
-                foreach (var obj in Resources.FindObjectsOfTypeAll(Il2CppInterop.Runtime.Il2CppType.From(t)))
-#endif
+                var typeArg = il2cpp != null ? il2cpp.TypeFrom.Invoke(null, new object[] { t }) : t;
+                if (u.FindObjectsOfTypeAll.Invoke(null, new[] { typeArg }) is not IEnumerable found) continue;
+                foreach (var obj in found.Cast<object>().ToList())
                 {
-                    if (obj == null) continue;
-                    UnityEngine.Object.Destroy(obj);
+                    if (!IsAlive(obj)) continue;
+                    u.Destroy.Invoke(null, new[] { obj });
                     n++;
                 }
             }
-            catch (Exception e) { log.Warning("Could not destroy instances of " + t.FullName + ": " + e.Message); }
+            catch (Exception e) { log.Warning("Could not destroy instances of " + t.FullName + ": " + (e.InnerException ?? e).Message); }
         }
         return n;
     }

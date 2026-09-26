@@ -1,9 +1,10 @@
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
-// apicompat <plugin.dll> <libdir>... : checks every member the plugin references in MelonLoader / 0Harmony / Il2CppInterop.Runtime
-// (by type, name, parameter count) against each lib dir, plus the private members HotReload reaches by reflection.
+// apicompat <plugin.dll> <libdir>... : checks every member the plugin references in MelonLoader / 0Harmony / Mono.Cecil /
+// Il2CppInterop.Runtime (by type, name, parameter count) against each lib dir, plus the members HotReload reaches by
+// reflection. A library a dir does not ship (Il2CppInterop in net35) is skipped for that dir.
 var plugin = args[0];
-string[] libs = { "MelonLoader", "0Harmony", "Il2CppInterop.Runtime" };
+string[] libs = { "MelonLoader", "0Harmony", "Mono.Cecil", "Il2CppInterop.Runtime" };
 var used = new List<(string lib, string type, string member, int pars)>();
 using (var pe = new PEReader(File.OpenRead(plugin)))
 {
@@ -31,14 +32,23 @@ var reflective = new[] {
     ("MelonLoader", "MelonLoader.Preferences.MelonPreferences_ReflectiveCategory", "SystemType"),
     ("MelonLoader", "MelonLoader.MelonPreferences_ReflectiveCategory", "SystemType"),
     ("MelonLoader", "MelonLoader.MelonAssembly", "set_Location"),
+    // Il2CppInterop, reflection only since the universal DLL (IL2CPP games; absent in net35 dirs)
+    ("Il2CppInterop.Runtime", "Il2CppInterop.Runtime.Injection.ClassInjector", "InjectedTypes"),
+    ("Il2CppInterop.Runtime", "Il2CppInterop.Runtime.Injection.InjectorHelpers", "s_ClassNameLookup"),
+    ("Il2CppInterop.Runtime", "Il2CppInterop.Runtime.Il2CppClassPointerStore", "GetNativeClassPointer"),
+    ("Il2CppInterop.Runtime", "Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase", "get_WasCollected"),
+    ("Il2CppInterop.Runtime", "Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase", "TryCast"),
+    ("Il2CppInterop.Runtime", "Il2CppInterop.Runtime.Il2CppType", "From"),
 };
 foreach (var dir in args.Skip(1))
 {
     var defs = new Dictionary<string, HashSet<string>>();
+    var present = new HashSet<string>();
     foreach (var lib in libs)
     {
         var p = Path.Combine(dir, lib + ".dll");
         if (!File.Exists(p)) continue;
+        present.Add(lib);
         using var pe = new PEReader(File.OpenRead(p));
         var md = pe.GetMetadataReader();
         foreach (var th in md.TypeDefinitions)
@@ -56,10 +66,12 @@ foreach (var dir in args.Skip(1))
             foreach (var fh in td.GetFields()) { set.Add(md.GetString(md.GetFieldDefinition(fh).Name) + "/-1"); set.Add(md.GetString(md.GetFieldDefinition(fh).Name)); }
         }
     }
-    var missing = used.Distinct().Where(u => !(defs.TryGetValue(u.lib + "|" + u.type, out var s) && s.Contains(u.pars == -2 ? "" : u.member + "/" + u.pars))).ToList();
+    var missing = used.Distinct().Where(u => present.Contains(u.lib)).Where(u => !(defs.TryGetValue(u.lib + "|" + u.type, out var s) && s.Contains(u.pars == -2 ? "" : u.member + "/" + u.pars))).ToList();
     var missingRefl = reflective.Where(r => defs.Any(d => d.Key == r.Item1 + "|" + r.Item2) && !defs[r.Item1 + "|" + r.Item2].Contains(r.Item3)).Select(r => r.Item2 + "." + r.Item3).ToList();
-    var reflTypesMissing = reflective.GroupBy(r => r.Item3).Where(g => !g.Any(r => defs.ContainsKey(r.Item1 + "|" + r.Item2) && defs[r.Item1 + "|" + r.Item2].Contains(r.Item3))).Select(g => g.Key).ToList();
-    Console.WriteLine($"{Path.GetFileName(Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(dir).TrimEnd(Path.DirectorySeparatorChar))))}: {used.Distinct().Count()} refs, {missing.Count} missing" +
+    var reflTypesMissing = reflective.Where(r => present.Contains(r.Item1)).GroupBy(r => r.Item3).Where(g => !g.Any(r => defs.ContainsKey(r.Item1 + "|" + r.Item2) && defs[r.Item1 + "|" + r.Item2].Contains(r.Item3))).Select(g => g.Key).ToList();
+    var full = Path.GetFullPath(dir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    var label = Path.GetFileName(Path.GetDirectoryName(full)) + "/" + Path.GetFileName(full) + " [" + string.Join(" ", present) + "]";
+    Console.WriteLine($"{label}: {used.Distinct().Count(u => present.Contains(u.lib))} refs, {missing.Count} missing" +
                       (missing.Count > 0 ? ": " + string.Join(", ", missing.Select(m => m.type + (m.member.Length > 0 ? "::" + m.member + "/" + m.pars : ""))) : "") +
                       $"; reflection targets missing: {(reflTypesMissing.Count == 0 ? "none" : string.Join(", ", reflTypesMissing))}");
 }
