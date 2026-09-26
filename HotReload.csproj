@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>HotReload</AssemblyName>
+    <RootNamespace>HotReload</RootNamespace>
+    <Version>0.1.0</Version>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GenerateDependencyFile>false</GenerateDependencyFile>
+    <DebugType>portable</DebugType>
+    <GameDir Condition="'$(GameDir)' == ''">C:\Games\Steam\steamapps\common\NoRestForTheWicked</GameDir>
+    <MLDir>$(GameDir)\MelonLoader\net6</MLDir>
+    <InteropDir>$(GameDir)\MelonLoader\Il2CppAssemblies</InteropDir>
+    <DeployToGame Condition="'$(DeployToGame)' == ''">true</DeployToGame>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="MelonLoader"><HintPath>$(MLDir)\MelonLoader.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="0Harmony"><HintPath>$(MLDir)\0Harmony.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Il2CppInterop.Runtime"><HintPath>$(MLDir)\Il2CppInterop.Runtime.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Il2Cppmscorlib"><HintPath>$(InteropDir)\Il2Cppmscorlib.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.CoreModule"><HintPath>$(InteropDir)\UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.InputLegacyModule"><HintPath>$(InteropDir)\UnityEngine.InputLegacyModule.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+
+  <Target Name="DeployToGame" AfterTargets="Build" Condition="'$(DeployToGame)' == 'true' And Exists('$(GameDir)\Mods')">
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GameDir)\Mods" Retries="2" RetryDelayMilliseconds="500" ContinueOnError="true" />
+    <Message Importance="high" Text="$(AssemblyName).dll -> $(GameDir)\Mods" />
+  </Target>
+
+</Project>
