@@ -27,6 +27,9 @@ internal static class StartupLoader
     private static readonly PropertyInfo? MelonAssemblyLocation = typeof(MelonAssembly).GetProperty(nameof(MelonAssembly.Location));
     private static MelonLogger.Instance _log = null!;
     private static bool _locationPatched;
+    private static HarmonyLib.Harmony? _harmony;
+    private static MethodInfo? _locationGetter;
+    private static bool _repatchLogged;
     private static string? _shadowDir;
     public static int Shadowed { get; private set; }
 
@@ -39,8 +42,9 @@ internal static class StartupLoader
         try
         {
             var runtimeAssembly = typeof(object).Assembly.GetType("System.Reflection.RuntimeAssembly", throwOnError: true)!;
-            var getter = AccessTools.PropertyGetter(runtimeAssembly, nameof(Assembly.Location));
-            harmony.Patch(getter, postfix: new HarmonyMethod(typeof(StartupLoader).GetMethod(nameof(LocationPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
+            _locationGetter = AccessTools.PropertyGetter(runtimeAssembly, nameof(Assembly.Location));
+            _harmony = harmony;
+            harmony.Patch(_locationGetter, postfix: LocationPostfixMethod);
             _locationPatched = true;
         }
         catch (Exception e)
@@ -48,6 +52,50 @@ internal static class StartupLoader
             log.Warning("Could not patch Assembly.Location; reloaded mods will see an empty Location: " + e.Message);
         }
         return _locationPatched;
+    }
+
+    private static HarmonyMethod LocationPostfixMethod =>
+        new HarmonyMethod(typeof(StartupLoader).GetMethod(nameof(LocationPostfix), BindingFlags.Static | BindingFlags.NonPublic));
+
+    /// <summary>
+    /// The Location getter lives in the runtime's precompiled (ReadyToRun) code. Once it is called often enough the
+    /// tiered JIT recompiles it and the new code does not carry the patch (seen in-game after the first reload). Checks
+    /// the patch on a known assembly and re-applies it; the recompiled (final-tier) code keeps the new patch.
+    /// </summary>
+    public static void EnsureLocationPatch(Assembly probe, string expected)
+    {
+        if (!_locationPatched || _harmony == null || _locationGetter == null) return;
+        string actual;
+        try { actual = probe.Location; } catch { return; }
+        if (string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase)) return;
+        try
+        {
+            _harmony.Unpatch(_locationGetter, HarmonyPatchType.Postfix, _harmony.Id);
+            _harmony.Patch(_locationGetter, postfix: LocationPostfixMethod);
+            if (!_repatchLogged)
+            {
+                _repatchLogged = true;
+                _log.Msg("Assembly.Location patch was dropped by the runtime's tiered JIT; re-applied" +
+                         (string.Equals(probe.Location, expected, StringComparison.OrdinalIgnoreCase) ? "." : ", but it still does not take effect."));
+            }
+        }
+        catch (Exception e) { _log.Warning("Could not re-apply the Assembly.Location patch: " + e.Message); }
+    }
+
+    /// <summary>
+    /// Copies a new build (and its pdb) into this session's shadow folder and returns the copy's path. Loading from a
+    /// file instead of from bytes gives the assembly a real Location even without the Location patch.
+    /// </summary>
+    public static string ShadowCopyForReload(string originalPath, byte[] dll, byte[]? pdb, int generation)
+    {
+        var dir = Path.Combine(_shadowDir ?? Path.Combine(MelonEnvironment.UserDataDirectory, "HotReload", "Shadow", Environment.ProcessId.ToString()),
+                               "reload-" + generation);
+        Directory.CreateDirectory(dir);
+        var copy = Path.Combine(dir, Path.GetFileName(originalPath));
+        File.WriteAllBytes(copy, dll);
+        if (pdb != null) File.WriteAllBytes(Path.ChangeExtension(copy, ".pdb"), pdb);
+        ShadowToMods[Path.GetFullPath(copy)] = originalPath;
+        return copy;
     }
 
     private static void LocationPostfix(Assembly __instance, ref string __result)

@@ -31,13 +31,13 @@ internal static class Retirer
     // Harmony: returning false skips the original; __result keeps its default (null / 0 / false).
     private static bool Skip() => false;
 
-    public static (int retired, int failed, long ms) Retire(Assembly asm, MelonLogger.Instance log)
+    public static (int retired, int failed, long ms) Retire(Assembly asm, IEnumerable<Type> wholeTypes, MelonLogger.Instance log)
     {
         var sw = Stopwatch.StartNew();
         _harmony ??= new HarmonyLib.Harmony("HotReload.retire");
         _skipPrefix ??= new HarmonyLib.HarmonyMethod(typeof(Retirer).GetMethod(nameof(Skip), BindingFlags.Static | BindingFlags.NonPublic));
         int ok = 0, failed = 0;
-        foreach (var m in ReachableMethods(asm))
+        foreach (var m in ReachableMethods(asm, wholeTypes))
         {
             try { _harmony.Patch(m, prefix: _skipPrefix); ok++; }
             catch (Exception e)
@@ -49,10 +49,18 @@ internal static class Retirer
         return (ok, failed, sw.ElapsedMilliseconds);
     }
 
-    /// <summary>Methods of <paramref name="asm"/> that outside code can still invoke after the melons are unregistered.</summary>
-    internal static IEnumerable<MethodInfo> ReachableMethods(Assembly asm)
+    /// <summary>
+    /// Methods of <paramref name="asm"/> that outside code can still invoke after the melons are unregistered. Every
+    /// method of <paramref name="wholeTypes"/> is included: old injected Il2Cpp classes, whose Unity messages (Update,
+    /// OnGUI, ...) the game calls directly until their instances are destroyed at the end of the frame.
+    /// </summary>
+    internal static IEnumerable<MethodInfo> ReachableMethods(Assembly asm, IEnumerable<Type>? wholeTypes = null)
     {
         var result = new HashSet<MethodInfo>();
+        const BindingFlags declared = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+        foreach (var t in wholeTypes ?? Array.Empty<Type>())
+            foreach (var m in t.GetMethods(declared))
+                Add(result, m);
         foreach (var type in SafeTypes(asm))
         {
             // Iterator / async state machines: coroutines and pending async continuations.

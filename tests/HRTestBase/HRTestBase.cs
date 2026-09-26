@@ -1,6 +1,8 @@
 using System.Collections;
 using System.Linq;
 using HarmonyLib;
+using Il2CppInterop.Runtime;
+using Il2CppInterop.Runtime.Injection;
 using HRTestBase;
 using MelonLoader;
 using UnityEngine;
@@ -21,7 +23,8 @@ public class TestConfig
 /// <summary>
 /// Exercises what HotReload cleans up: a patch through a separate Harmony instance, a reflective preference
 /// category whose value must survive reloads, scene callbacks for scenes that are already open (0.3), and an object kept
-/// across scenes, an endless coroutine and a timer callback, none of which this mod cleans up itself (0.4).
+/// across scenes, an endless coroutine and a timer callback, none of which this mod cleans up itself (0.4), and an
+/// injected MonoBehaviour on a normal scene object (0.6).
 /// </summary>
 public class HRTestBaseMod : MelonMod
 {
@@ -46,6 +49,11 @@ public class HRTestBaseMod : MelonMod
         _reloads.Value++;
         settings.SaveToFile(false);
         LoggerInstance.Msg("plain category entry Reloads = " + _reloads.Value);
+
+        // Il2Cpp class injection: the reloaded build registers a class with the same full name.
+        ClassInjector.RegisterTypeInIl2Cpp<HRTestBehaviour>();
+        HRTestBehaviour.Build = Greeting();
+        new GameObject("HRTestBase_Behaviour").AddComponent<HRTestBehaviour>(); // normal scene object, not kept across scenes
 
         var go = new GameObject(PersistentName);
         Object.DontDestroyOnLoad(go);
@@ -75,6 +83,7 @@ public class HRTestBaseMod : MelonMod
         {
             int n = Resources.FindObjectsOfTypeAll<GameObject>().Count(g => g.name == PersistentName);
             LoggerInstance.Msg(PersistentName + " objects alive: " + n);
+            LoggerInstance.Msg("HRTestBehaviour instances alive: " + Resources.FindObjectsOfTypeAll(Il2CppType.Of<HRTestBehaviour>()).Length);
         }
     }
 
@@ -82,4 +91,20 @@ public class HRTestBaseMod : MelonMod
 
     public override void OnSceneWasLoaded(int buildIndex, string sceneName) =>
         LoggerInstance.Msg("OnSceneWasLoaded " + sceneName + " (" + Greeting() + ")");
+}
+
+/// <summary>Injected into Il2Cpp; logs from its Update every 3 seconds with the build that created it.</summary>
+public class HRTestBehaviour : MonoBehaviour
+{
+    public static string Build = "";
+    private float _next;
+
+    public HRTestBehaviour(System.IntPtr ptr) : base(ptr) { }
+
+    private void Update()
+    {
+        if (Time.time < _next) return;
+        _next = Time.time + 3f;
+        MelonLogger.Msg("[HRTestBase] behaviour Update from " + Build);
+    }
 }

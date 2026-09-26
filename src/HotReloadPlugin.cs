@@ -8,7 +8,7 @@ using HotReload;
 using MelonLoader;
 using MelonLoader.Utils;
 
-[assembly: MelonInfo(typeof(HotReloadPlugin), "HotReload", "0.5.0", "vergir")]
+[assembly: MelonInfo(typeof(HotReloadPlugin), "HotReload", "0.6.0", "vergir")]
 // No MelonGame attribute: works in any IL2CPP game. Every API it binds to exists since MelonLoader 0.6.0
 // (checked against the 0.6.0-0.7.3 release binaries); shadow-copying Mods/ needs 0.7.1+.
 [assembly: MelonPlatformDomain(MelonPlatformDomainAttribute.CompatibleDomains.IL2CPP)]
@@ -81,7 +81,7 @@ public class HotReloadPlugin : MelonPlugin
         _reloader.Snapshot(WatchedFiles());
         LoggerInstance.Msg("MelonLoader " + LoaderVersion() + ", .NET " + Environment.Version + ". Shadow copy: " + _shadowStatus
                            + "; Assembly.Location patch: " + (_locationPatched ? "on" : "off")
-                           + "; DontDestroyOnLoad tracking: " + (ddol ? "on" : "off") + "; reload key: " + _keys.Describe() + ".");
+                           + "; DontDestroyOnLoad tracking: " + (ddol ? "on" : "off") + "; class re-injection: " + (InjectedTypes.Supported ? "on" : "off") + "; reload key: " + _keys.Describe() + ".");
         if (_shadowCopy.Value) LoggerInstance.Msg(StartupLoader.Describe());
     }
 
@@ -107,8 +107,8 @@ public class HotReloadPlugin : MelonPlugin
             description: "When a mod reloads, also reload the loaded mods that reference it, so they call its new build.");
         _retireOldBuild = _cat.CreateEntry("RetireOldBuild", true,
             description: "After a reload, turn the old build's delegate targets and coroutine/async steps into no-ops, so callbacks, coroutines and timers it left behind stop instead of running old code.");
-        _destroyPersistent = _cat.CreateEntry("DestroyPersistentObjects", true,
-            description: "After a reload, destroy the GameObjects the old build passed to DontDestroyOnLoad (UI roots, canvases, EventSystems).");
+        _destroyPersistent = _cat.CreateEntry("DestroyOldObjects", true,
+            description: "After a reload, destroy the GameObjects the old build passed to DontDestroyOnLoad (UI roots, canvases, EventSystems) and live instances of the old build's injected Il2Cpp classes.");
         _inputBackend = _cat.CreateEntry("InputBackend", "Auto",
             description: "How the reload key is read: Auto (legacy Input, then Input System, then Windows key state), Legacy, InputSystem or Windows.");
         _cat.SaveToFile(false); // writes the file with defaults and descriptions on first run

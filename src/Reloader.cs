@@ -137,8 +137,18 @@ internal sealed class Reloader
             var pdbPath = Path.ChangeExtension(path, ".pdb");
             if (File.Exists(pdbPath) && TryRead(pdbPath, out var pdbBytes)) pdb = pdbBytes;
             var ctx = new ModLoadContext(name + " #" + (++_generation));
-            Assembly asm = ctx.LoadFromStream(new MemoryStream(bytes), pdb == null ? null : new MemoryStream(pdb));
+            Assembly asm;
+            try
+            {
+                // From a copy in the shadow folder: a real Location, and the original in Mods/ stays unlocked.
+                asm = ctx.LoadFromAssemblyPath(StartupLoader.ShadowCopyForReload(path, bytes, pdb, _generation));
+            }
+            catch (IOException)
+            {
+                asm = ctx.LoadFromStream(new MemoryStream(bytes), pdb == null ? null : new MemoryStream(pdb));
+            }
             StartupLoader.RememberLocation(asm, path);
+            StartupLoader.EnsureLocationPatch(asm, path);
             Latest[name] = asm;
 
             // 4. Create and register its melons (OnEarlyInitializeMelon, Harmony auto-patch, OnInitializeMelon, OnLateInitializeMelon).
@@ -147,6 +157,7 @@ internal sealed class Reloader
             if (ma.RottenMelons.Count > 0) _log.Error(name + ": " + ma.RottenMelons.Count + " melon(s) failed to load (see above).");
             MelonBase.RegisterSorted(ma.LoadedMelons);
             _source[name] = path;
+            foreach (var melon in ma.LoadedMelons.Where(m => m.Registered)) RunMissedStartCallbacks(melon);
 
             // 5. The scenes that are already open.
             int scenes = 0;
@@ -174,6 +185,26 @@ internal sealed class Reloader
         {
             _log.Error("Reload of " + name + " failed: " + e);
             return false;
+        }
+    }
+
+    /// <summary>
+    /// MelonLoader calls OnInitializeMelon / OnLateInitializeMelon itself for a melon registered late, but the obsolete
+    /// OnApplicationStart / OnApplicationLateStart are subscribed to one-time events that already fired, so a reloaded
+    /// mod that still uses them (UnityExplorer does) would never start. Call the ones the mod overrides.
+    /// </summary>
+    private void RunMissedStartCallbacks(MelonBase melon)
+    {
+        foreach (var (callback, fired) in new (string, MelonEvent)[] {
+                     ("OnApplicationStart", MelonEvents.OnApplicationStart),
+                     ("OnApplicationLateStart", MelonEvents.OnApplicationLateStart) })
+        {
+            if (!fired.Disposed) continue; // not fired yet: MelonLoader will call it
+            if (callback == "OnApplicationStart" && melon is not MelonMod) continue; // plugins wire it to OnPreModsLoaded
+            var m = melon.GetType().GetMethod(callback, BindingFlags.Instance | BindingFlags.Public, null, Type.EmptyTypes, null);
+            if (m == null || m.DeclaringType == typeof(MelonBase) || m.DeclaringType == typeof(MelonMod)) continue; // not overridden
+            try { m.Invoke(melon, null); }
+            catch (TargetInvocationException e) { melon.LoggerInstance.Error(callback + " during hot reload: " + e.InnerException); }
         }
     }
 
@@ -222,10 +253,16 @@ internal sealed class Reloader
     private void RetireOldBuild(string name, HashSet<Assembly> oldAssemblies, HashSet<string> visited)
     {
         var parts = new List<string>();
+        var injected = oldAssemblies.SelectMany(InjectedTypes.InjectedIn).ToList();
         if (_destroyPersistent())
         {
             int destroyed = UnityApi.DestroyPersistentObjects(name, _log);
             if (destroyed > 0) parts.Add("destroyed " + destroyed + " object(s) kept across scenes");
+            if (injected.Count > 0)
+            {
+                int instances = UnityApi.DestroyInstancesOf(injected, _log);
+                if (instances > 0) parts.Add("destroyed " + instances + " instance(s) of old injected classes");
+            }
         }
         if (_retireOldBuild())
         {
@@ -240,9 +277,15 @@ internal sealed class Reloader
             else
                 foreach (var asm in oldAssemblies)
                 {
-                    var (retired, failed, ms) = Retirer.Retire(asm, _log);
+                    var (retired, failed, ms) = Retirer.Retire(asm, injected.Where(t => t.Assembly == asm), _log);
                     if (retired + failed > 0) parts.Add("retired " + retired + " old method(s)" + (failed > 0 ? " (" + failed + " failed)" : "") + " in " + ms + " ms");
                 }
+        }
+        // The new build registers classes with the same names; Il2CppInterop would refuse them otherwise.
+        if (injected.Count > 0)
+        {
+            int released = InjectedTypes.Release(injected, _log);
+            if (released > 0) parts.Add("released " + released + " injected class name(s)");
         }
         if (parts.Count > 0) _log.Msg(name + ": " + string.Join("; ", parts) + ".");
     }

@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
+using MelonLoader;
 
 namespace HotReload;
 
@@ -17,10 +19,16 @@ internal static class Callers
         "MonoMod", "Il2CppInterop", "Il2Cpp", "UnityEngine", "Unity.", "System.", "Microsoft.",
     };
 
-    /// <summary>Simple name of the first non-infrastructure assembly on the stack, or null (e.g. the game itself called).</summary>
+    /// <summary>
+    /// Simple name of the mod behind the current call: the first loaded melon assembly on the stack (so a helper library
+    /// such as UniverseLib acting for UnityExplorer counts as UnityExplorer), else the first non-infrastructure assembly,
+    /// else null (e.g. the game itself called).
+    /// </summary>
     public static string? FindModAssembly(int skipFrames = 1)
     {
         var frames = new StackTrace(skipFrames + 1, false).GetFrames();
+        string? firstOther = null;
+        HashSet<System.Reflection.Assembly>? melons = null;
         foreach (var f in frames)
         {
             var asm = f.GetMethod()?.DeclaringType?.Assembly;
@@ -30,8 +38,11 @@ internal static class Callers
             bool infra = false;
             foreach (var p in InfrastructurePrefixes)
                 if (name.StartsWith(p, StringComparison.OrdinalIgnoreCase)) { infra = true; break; }
-            if (!infra) return name;
+            if (infra) continue;
+            melons ??= new HashSet<System.Reflection.Assembly>(MelonAssembly.LoadedAssemblies.Select(a => a.Assembly));
+            if (melons.Contains(asm)) return name;
+            firstOther ??= name;
         }
-        return null;
+        return firstOther;
     }
 }

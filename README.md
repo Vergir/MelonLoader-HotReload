@@ -39,7 +39,7 @@ Created on first launch. Edits apply immediately, except `ShadowCopyMods`.
 | `ReplaySceneEvents` | `true` | After a reload, call the mod's `OnSceneWasLoaded` / `OnSceneWasInitialized` for scenes already open. |
 | `ReloadDependents` | `true` | After a mod reloads, reload the loaded mods that reference it. |
 | `RetireOldBuild` | `true` | Turn the old build's delegate targets and coroutine/async steps into no-ops after a reload (see below). |
-| `DestroyPersistentObjects` | `true` | Destroy the GameObjects the old build passed to `DontDestroyOnLoad`. |
+| `DestroyOldObjects` | `true` | Destroy the GameObjects the old build passed to `DontDestroyOnLoad`, and live instances of its injected Il2Cpp classes. |
 | `InputBackend` | `"Auto"` | How the reload key is read. `Auto` tries legacy `UnityEngine.Input`, then the Input System package (by reflection, for games that disabled legacy input), then the Windows key state while the game has focus (also under Wine/Proton). Or force `Legacy`, `InputSystem` or `Windows`. |
 
 ## What a reload does
@@ -47,13 +47,16 @@ Created on first launch. Edits apply immediately, except `ShadowCopyMods`.
 1. `MelonAssembly.UnregisterMelons`: the mod's `OnDeinitializeMelon` runs, MelonLoader callbacks are unsubscribed, and its
    `HarmonyInstance` is unpatched.
 2. Every remaining Harmony patch whose patch method lives in the old assembly is removed, whatever Harmony instance made it.
-   Objects the old build kept across scenes are destroyed, and the old build is retired (next section).
+   Objects the old build kept across scenes and live instances of its injected Il2Cpp classes are destroyed, the old build
+   is retired (next section), and its injected class names are released so the new build can inject them again.
 3. The mod's preference categories are saved and released, so the new build can create them again with the saved values.
    They are found through the old build's own fields (the categories and entries it keeps), reflective `CreateCategory<T>`
    categories typed with its classes, and categories named like the mod.
-4. The new DLL is loaded from bytes, with its `.pdb`, into its own `AssemblyLoadContext`. `Assembly.Location` reports the
-   `Mods/` path.
+4. The new DLL is copied, with its `.pdb`, into this session's shadow folder and loaded from there into its own
+   `AssemblyLoadContext`. `Assembly.Location` reports the `Mods/` path.
 5. Its melons are registered: `OnEarlyInitializeMelon`, Harmony auto-patching, `OnInitializeMelon`, `OnLateInitializeMelon`.
+   The obsolete `OnApplicationStart` / `OnApplicationLateStart`, which hang off one-time events that already fired, are called
+   by HotReload if the mod overrides them.
 6. Scene callbacks are replayed for the scenes already open.
 7. Loaded mods that reference it are reloaded the same way, so they call the new build.
 
@@ -75,10 +78,15 @@ the owner from the managed call stack when `DontDestroyOnLoad` is called; the ga
 
 ## Rules for mods that should hot-reload
 
-Only one thing is off-limits:
+Nothing is strictly off-limits any more. Il2Cpp class injection (`ClassInjector.RegisterTypeInIl2Cpp`,
+`[RegisterTypeInIl2Cpp]`, `MonoBehaviour` subclasses) works: Il2CppInterop refuses a second class with the same full name,
+so HotReload removes the old build's names from `ClassInjector.InjectedTypes` and `InjectorHelpers.s_ClassNameLookup`
+after destroying the old instances and retiring their methods. Code that looks a class up by name gets the new one.
 
-* **Il2Cpp class injection**: `ClassInjector.RegisterTypeInIl2Cpp`, `[RegisterTypeInIl2Cpp]`, or classes deriving from
-  `MonoBehaviour` and other Il2Cpp types. Il2CppInterop refuses a second type with the same full name.
+* **State held by a helper library that is not reloaded.** A library in `UserLibs` keeps whatever the old build registered
+  with it. UnityExplorer is the known case: it registers its UI and its log callback with UniverseLib. The reloaded build
+  starts, re-injects its classes and re-applies its patches, but UniverseLib still holds the old UI registration, so the new
+  UI is not created. Reloading libraries is on the roadmap.
 
 What HotReload cannot undo, so the mod must in `OnDeinitializeMelon`:
 
@@ -108,7 +116,7 @@ dotnet checker/bin/Release/net8.0/HotReloadCheck.dll <dll-or-folder>... --md rep
 | READY | Nothing found that HotReload cannot clean up. |
 | REVIEW | Uses something HotReload cannot clean up, but has `OnDeinitializeMelon`; check that it undoes it. |
 | NEEDS CLEANUP | Uses something HotReload cannot clean up and has no `OnDeinitializeMelon`. |
-| BLOCKED | Uses Il2Cpp class injection. |
+| BLOCKED | Uses something HotReload cannot reload (no current rule produces this). |
 | PLUGIN | A `MelonPlugin`; not reloaded. |
 | UNSUPPORTED | Built for a Mono game, or for MelonLoader 0.5 (Unhollower). |
 
@@ -117,8 +125,9 @@ obfuscation. REVIEW means "read the cleanup code or try it".
 
 ## Test mods: `tests/`
 
-`HRTestBase` uses a separate Harmony instance, a reflective preference category, scene callbacks, a `DontDestroyOnLoad`
-object, an endless coroutine and a timer, and cleans up none of them. `HRTestDependent`
+`HRTestBase` uses a separate Harmony instance, a reflective preference category, a category with an unrelated name,
+scene callbacks, a `DontDestroyOnLoad` object, an endless coroutine, a timer and an injected `MonoBehaviour`, and cleans up
+none of them. `HRTestDependent`
 references it. Build `tests/HRTestDependent` to deploy both, then rebuild `HRTestBase` with `-p:Version=1.0.1` while the game runs.
 
 ## Building
@@ -149,12 +158,15 @@ and patches only the game, the runtime and the mods.
 | Preference categories found through the old build's fields | `CreateEntry` throws on duplicates. Recording who creates a category would need a hook on MelonLoader, which PatchShield blocks. |
 | Reflective categories matched by their private `SystemType` | `CreateCategory<T>` makes a new category on every call. |
 | Postfix on `RuntimeAssembly.Location` | Assemblies loaded from bytes report an empty location. |
-| Postfix on `UnityEngine.Object.DontDestroyOnLoad` | Records which mod kept an object across scenes (managed call stack). |
+| Postfix on `UnityEngine.Object.DontDestroyOnLoad` | Records which mod kept an object across scenes (managed call stack; a loaded mod on the stack wins over a helper library). |
+| Remove old names from `ClassInjector.InjectedTypes` and `InjectorHelpers.s_ClassNameLookup` (Il2CppInterop) | Both reject a second injected class with the same full name. |
+| Re-apply the `Assembly.Location` postfix when it stops working | The getter is precompiled runtime code; the tiered JIT can recompile it without the patch. Reloaded builds are loaded from a file copy, so their `Location` is never empty either way. |
 | Own watcher for `HotReload.toml` | MelonLoader's preferences watcher misses rename-style saves and swallows the first change after a save. |
 
-A MelonLoader update that renames `loadedAssemblies`, `_modDirs` or `SystemType` switches off the matching feature with a
-warning.
+A MelonLoader or Il2CppInterop update that renames `loadedAssemblies`, `_modDirs`, `SystemType`, `InjectedTypes` or
+`s_ClassNameLookup` switches off the matching feature with a warning.
 
 Source: `src/HotReloadPlugin.cs` (config, watchers), `src/Reloader.cs` (unload/load/dependents/Harmony cleanup),
 `src/StartupLoader.cs` (shadow copy, `Assembly.Location`), `src/Retirer.cs`, `src/PrefOwnership.cs`, `src/Callers.cs`,
-`src/KeyInput.cs` (reload key backends), `src/UnityApi.cs` (Unity calls, `DontDestroyOnLoad` tracking).
+`src/KeyInput.cs` (reload key backends), `src/InjectedTypes.cs` (class re-injection), `src/UnityApi.cs` (Unity calls,
+`DontDestroyOnLoad` tracking, destroying old instances).

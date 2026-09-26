@@ -9,7 +9,7 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <AssemblyName>HotReload</AssemblyName>
     <RootNamespace>HotReload</RootNamespace>
-    <Version>0.5.0</Version>
+    <Version>0.6.0</Version>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <GenerateDependencyFile>false</GenerateDependencyFile>
     <DebugType>portable</DebugType>

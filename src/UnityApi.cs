@@ -105,4 +105,29 @@ internal static class UnityApi
         }
         return n;
     }
+
+    /// <summary>
+    /// Destroys every live Unity object whose Il2Cpp class is one of the old build's injected types (components,
+    /// ScriptableObjects). Their GameObjects stay unless the mod also kept them across scenes.
+    /// </summary>
+    public static int DestroyInstancesOf(IEnumerable<Type> injectedTypes, MelonLogger.Instance log)
+    {
+        int n = 0;
+        foreach (var t in injectedTypes)
+        {
+            if (!typeof(UnityEngine.Object).IsAssignableFrom(t)) continue;
+            try
+            {
+                var il2cppType = Il2CppInterop.Runtime.Il2CppType.From(t);
+                foreach (var obj in Resources.FindObjectsOfTypeAll(il2cppType))
+                {
+                    if (obj == null) continue;
+                    UnityEngine.Object.Destroy(obj);
+                    n++;
+                }
+            }
+            catch (Exception e) { log.Warning("Could not destroy instances of " + t.FullName + ": " + e.Message); }
+        }
+        return n;
+    }
 }

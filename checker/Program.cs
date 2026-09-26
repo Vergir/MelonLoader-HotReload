@@ -7,7 +7,7 @@ using System.Text;
 namespace HotReloadCheck;
 
 /// <summary>
-/// Scans compiled MelonLoader mods (no source needed) and reports whether they can be hot-reloaded by HotReload 0.5,
+/// Scans compiled MelonLoader mods (no source needed) and reports whether they can be hot-reloaded by HotReload 0.6,
 /// and what the author would have to add. It reads metadata only: which APIs a mod references, which types it
 /// defines and which callbacks it overrides. It does not execute or load anything.
 ///
@@ -326,9 +326,10 @@ internal static class Rules
             injected = injected.Concat(s.TypeDefs
                 .Where(t => t.BaseType != null && t.BaseScope != null && Il2CppScope(t.BaseScope) && !IsManagedOnlyBase(t.BaseType))
                 .Select(t => t.FullName + " : " + t.BaseType));
-        Add("injection", Severity.Blocker, "Il2Cpp class injection",
-            "Il2CppInterop refuses to inject a second type with the same full name, so the reloaded build cannot register its " +
-            "MonoBehaviours/Il2Cpp subclasses. Planned fix in HotReload: rename injected types per reload. Until then: not reloadable.",
+        Add("injection", Severity.Info, "Il2Cpp class injection",
+            "Handled: HotReload destroys live instances of the old build's injected classes, retires their methods and releases " +
+            "their names in Il2CppInterop, so the new build can inject classes with the same names. Code that finds these " +
+            "classes by name gets the new ones.",
             injected);
 
         // ---- Needs cleanup in OnDeinitializeMelon --------------------------------------------------------------
@@ -415,7 +416,7 @@ internal static class Output
         ["REVIEW"] = "uses something HotReload cannot clean up, but has OnDeinitializeMelon; check it undoes it",
         ["NEEDS CLEANUP"] = "uses something HotReload cannot clean up and has no OnDeinitializeMelon; author must add cleanup",
         ["PLUGIN"] = "a MelonPlugin; HotReload only reloads mods in Mods/",
-        ["BLOCKED"] = "uses Il2Cpp class injection; cannot be reloaded yet",
+        ["BLOCKED"] = "uses something HotReload cannot reload",
         ["UNSUPPORTED (Mono game)"] = "built for a Mono Unity game; HotReload supports IL2CPP games on MelonLoader 0.7 only",
         ["UNSUPPORTED (MelonLoader 0.5 era)"] = "built against Unhollower; does not load on MelonLoader 0.6+ anyway",
         ["LIBRARY"] = "no [MelonInfo]; not a mod",
@@ -426,7 +427,7 @@ internal static class Output
         var sb = new StringBuilder();
         sb.AppendLine("# HotReload compatibility report");
         sb.AppendLine();
-        sb.AppendLine("Static scan of compiled DLLs (metadata only), against HotReload 0.5. \"Cleanup\" findings are things HotReload cannot undo itself; " +
+        sb.AppendLine("Static scan of compiled DLLs (metadata only), against HotReload 0.6. \"Cleanup\" findings are things HotReload cannot undo itself; " +
                       "whether the mod's OnDeinitializeMelon undoes them needs a look at the code or a test.");
         sb.AppendLine();
         sb.AppendLine("| Mod | Version | Author | Kind | Verdict | Cleanup items | Handled | Depends on |");
