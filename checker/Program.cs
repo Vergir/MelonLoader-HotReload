@@ -7,7 +7,7 @@ using System.Text;
 namespace HotReloadCheck;
 
 /// <summary>
-/// Scans compiled MelonLoader mods (no source needed) and reports whether they can be hot-reloaded by HotReload 0.3,
+/// Scans compiled MelonLoader mods (no source needed) and reports whether they can be hot-reloaded by HotReload 0.4,
 /// and what the author would have to add. It reads metadata only: which APIs a mod references, which types it
 /// defines and which callbacks it overrides. It does not execute or load anything.
 ///
@@ -332,50 +332,57 @@ internal static class Rules
             injected);
 
         // ---- Needs cleanup in OnDeinitializeMelon --------------------------------------------------------------
-        Add("coroutines", Severity.Cleanup, "Starts MelonCoroutines",
-            "Only matters for coroutines that keep running (loops, long waits): they continue in the old build after a reload. One-shot coroutines that finish on their own are harmless. For long-running ones keep the token and call MelonCoroutines.Stop in OnDeinitializeMelon.",
-            Refs(m => m.Type == "MelonLoader.MelonCoroutines" && m.Member == "Start"));
         Add("assetbundles", Severity.Cleanup, "Loads AssetBundles",
             "Loading the same bundle again fails while the old one is loaded. Call bundle.Unload(true/false) in OnDeinitializeMelon.",
             Refs(m => m.Type == "UnityEngine.AssetBundle" && m.Member.StartsWith("LoadFrom")));
-        Add("objects", Severity.Cleanup, "Creates GameObjects / components",
-            "Objects the old build created stay in the scene. Destroy them in OnDeinitializeMelon (unless the game owns them).",
+        Add("nativehooks", Severity.Cleanup, "Native / MonoMod hooks outside Harmony",
+            "HotReload removes only Harmony patches, and it retires the old build's delegate targets, so a hooked function would " +
+            "return defaults instead of running. Dispose these hooks in OnDeinitializeMelon (or set RetireOldBuild = false).",
+            Refs(m => (m.Type.StartsWith("MonoMod.RuntimeDetour.") && m.Member == ".ctor") ||
+                      (m.Type == "MelonLoader.MelonUtils" && m.Member.StartsWith("NativeHook")) ||
+                      (m.Type.StartsWith("MelonLoader.NativeUtils.NativeHook") && m.Member is ".ctor" or "Attach")));
+        Add("threads", Severity.Cleanup, "Starts its own threads",
+            "A loop already running on a thread keeps running after a reload; retiring only stops later calls. Signal it to stop in OnDeinitializeMelon.",
+            Refs(m => m.Type == "System.Threading.Thread" && m.Member == ".ctor"));
+
+        // ---- Handled by HotReload 0.4 (informational) ----------------------------------------------------------
+        Add("coroutines", Severity.Info, "Starts MelonCoroutines",
+            "Handled: the old build's coroutine steps are retired, so its coroutines end on their next step.",
+            Refs(m => m.Type == "MelonLoader.MelonCoroutines" && m.Member == "Start"));
+        Add("persistent", Severity.Info, "Keeps objects across scenes (DontDestroyOnLoad)",
+            "Handled: HotReload destroys the objects the old build passed to DontDestroyOnLoad.",
+            Refs(m => m.Type == "UnityEngine.Object" && m.Member == "DontDestroyOnLoad"));
+        Add("objects", Severity.Info, "Creates GameObjects / components",
+            "Handled for the common case: objects in normal scenes go away with the scene. Components added to objects the game keeps stay until then.",
             Refs(m => (m.Type == "UnityEngine.GameObject" && (m.Member == ".ctor" || m.Member == "AddComponent")) ||
-                      (m.Type == "UnityEngine.Object" && (m.Member == "Instantiate" || m.Member == "DontDestroyOnLoad"))));
-        Add("callbacks", Severity.Cleanup, "Hands callbacks to the game",
-            "Listeners/delegates given to Il2Cpp objects keep calling the old build. Remove them in OnDeinitializeMelon, or make the game rebuild that UI.",
+                      (m.Type == "UnityEngine.Object" && m.Member == "Instantiate")));
+        Add("callbacks", Severity.Info, "Hands callbacks to the game",
+            "Handled: the old build's delegate targets are retired, so leftover listeners and settings rows do nothing until the game rebuilds that UI.",
             Refs(m => (m.Member == "AddListener" && m.Type.StartsWith("UnityEngine.Events.UnityEvent")) ||
                       (m.Type.EndsWith("DelegateSupport") && m.Member == "ConvertDelegate") ||
                       (m.Member == "op_Implicit" && m.Type.StartsWith("Il2CppSystem.") && (m.Type.Contains("Action") || m.Type.Contains("Func") || m.Type.Contains("Predicate") || m.Type.Contains("Comparison"))) ||
                       (m.Member.StartsWith("add_") && Il2CppScope(m.Scope))));
-        Add("nativehooks", Severity.Cleanup, "Native / MonoMod hooks outside Harmony",
-            "HotReload only removes Harmony patches. Dispose these hooks in OnDeinitializeMelon.",
-            Refs(m => (m.Type.StartsWith("MonoMod.RuntimeDetour.") && m.Member == ".ctor") ||
-                      (m.Type == "MelonLoader.MelonUtils" && m.Member.StartsWith("NativeHook")) ||
-                      (m.Type.StartsWith("MelonLoader.NativeUtils.NativeHook") && m.Member is ".ctor" or "Attach")));
-        Add("threads", Severity.Cleanup, "Background threads, timers, tasks or file watchers",
-            "These keep running after a reload. Stop/dispose them in OnDeinitializeMelon.",
-            Refs(m => (m.Type == "System.Threading.Thread" && m.Member == ".ctor") ||
-                      (m.Type is "System.Threading.Timer" or "System.Timers.Timer" or "System.IO.FileSystemWatcher" && m.Member == ".ctor") ||
+        Add("timers", Severity.Info, "Timers, tasks, thread-pool work or file watchers",
+            "Handled: their callbacks and async steps in the old build are retired.",
+            Refs(m => (m.Type is "System.Threading.Timer" or "System.Timers.Timer" or "System.IO.FileSystemWatcher" && m.Member == ".ctor") ||
                       (m.Type == "System.Threading.Tasks.Task" && m.Member == "Run") ||
                       (m.Type == "System.Threading.Tasks.TaskFactory" && m.Member == "StartNew") ||
                       (m.Type == "System.Threading.ThreadPool" && m.Member.StartsWith("QueueUserWorkItem"))));
-        Add("staticevents", Severity.Cleanup, "Subscribes to process-wide .NET events",
-            "Handlers on AppDomain/Console events outlive the old build. Unsubscribe in OnDeinitializeMelon.",
+        Add("staticevents", Severity.Info, "Subscribes to process-wide .NET events",
+            "Handled: the old build's handlers are retired (they stay subscribed but do nothing).",
             Refs(m => m.Member.StartsWith("add_") && m.Type is "System.AppDomain" or "System.Console"));
 
-        // ---- Handled by HotReload 0.3 (informational) ----------------------------------------------------------
         Add("harmony", Severity.Info, "Own Harmony instance",
-            "Handled: HotReload 0.3 removes patches by the assembly of the patch method, not only the melon's HarmonyInstance.",
+            "Handled: HotReload removes patches by the assembly of the patch method, not only the melon's HarmonyInstance.",
             Refs(m => m.Type == "HarmonyLib.Harmony" && (m.Member == ".ctor" || m.Member == "CreateAndPatchAll")));
         Add("reflectiveprefs", Severity.Info, "Reflective preference category (CreateCategory<T>)",
-            "Handled: HotReload 0.3 saves and drops the old category before the reload.",
+            "Handled: HotReload saves and drops the old category before the reload.",
             Refs(m => m.Type == "MelonLoader.MelonPreferences" && m.Member == "CreateCategory" && m.GenericMethod));
         Add("location", Severity.Info, "Reads Assembly.Location",
-            "Handled: HotReload 0.3 makes Assembly.Location return the DLL path for mods loaded from memory.",
+            "Handled: HotReload makes Assembly.Location return the DLL path for mods loaded from memory.",
             Refs(m => m.Type == "System.Reflection.Assembly" && m.Member == "get_Location"));
         Add("scenes", Severity.Info, "Scene callbacks",
-            "Handled: HotReload 0.3 replays OnSceneWasLoaded/OnSceneWasInitialized for scenes already open after a reload.",
+            "Handled: HotReload replays OnSceneWasLoaded/OnSceneWasInitialized for scenes already open after a reload.",
             new[] { "OnSceneWasLoaded", "OnSceneWasInitialized" }.Where(s.DefinedMethods.Contains));
         if (s.LooksObfuscated)
             findings.Add(new Finding("obfuscated", Severity.Info, "Looks obfuscated", "Findings may be incomplete.", new List<string> { "many unreadable type names" }));
@@ -404,9 +411,9 @@ internal static class Output
 {
     private static readonly Dictionary<string, string> Legend = new()
     {
-        ["READY"] = "nothing found that outlives a reload; should hot-reload as is",
-        ["REVIEW"] = "creates things that outlive a reload, but has OnDeinitializeMelon; check it undoes them",
-        ["NEEDS CLEANUP"] = "creates things that outlive a reload and has no OnDeinitializeMelon; author must add cleanup",
+        ["READY"] = "nothing found that HotReload cannot clean up; should hot-reload as is",
+        ["REVIEW"] = "uses something HotReload cannot clean up, but has OnDeinitializeMelon; check it undoes it",
+        ["NEEDS CLEANUP"] = "uses something HotReload cannot clean up and has no OnDeinitializeMelon; author must add cleanup",
         ["PLUGIN"] = "a MelonPlugin; HotReload only reloads mods in Mods/",
         ["BLOCKED"] = "uses Il2Cpp class injection; cannot be reloaded yet",
         ["UNSUPPORTED (Mono game)"] = "built for a Mono Unity game; HotReload supports IL2CPP games on MelonLoader 0.7 only",
@@ -419,10 +426,10 @@ internal static class Output
         var sb = new StringBuilder();
         sb.AppendLine("# HotReload compatibility report");
         sb.AppendLine();
-        sb.AppendLine("Static scan of compiled DLLs (metadata only). \"Cleanup\" findings mean the mod creates something that outlives a reload; " +
-                      "whether its OnDeinitializeMelon really undoes it needs a look at the code or a test.");
+        sb.AppendLine("Static scan of compiled DLLs (metadata only), against HotReload 0.4. \"Cleanup\" findings are things HotReload cannot undo itself; " +
+                      "whether the mod's OnDeinitializeMelon undoes them needs a look at the code or a test.");
         sb.AppendLine();
-        sb.AppendLine("| Mod | Version | Author | Kind | Verdict | Cleanup items | Handled by 0.3 | Depends on |");
+        sb.AppendLine("| Mod | Version | Author | Kind | Verdict | Cleanup items | Handled | Depends on |");
         sb.AppendLine("|---|---|---|---|---|---|---|---|");
         foreach (var r in reports.OrderBy(r => r.Rank).ThenBy(r => r.Scan.MelonName, StringComparer.OrdinalIgnoreCase))
         {
@@ -454,7 +461,7 @@ internal static class Output
                 sb.AppendLine($"- **{tag}: {f.Title}.** {f.Advice} Evidence: {ev}");
             }
             if (r.Dependencies.Count > 0)
-                sb.AppendLine($"- **depends on:** {string.Join(", ", r.Dependencies)}. HotReload 0.3 reloads this mod when a dependency in Mods/ reloads; libraries in UserLibs are not reloaded.");
+                sb.AppendLine($"- **depends on:** {string.Join(", ", r.Dependencies)}. HotReload reloads this mod when a dependency in Mods/ reloads; libraries in UserLibs are not reloaded.");
             sb.AppendLine();
         }
         return sb.ToString();

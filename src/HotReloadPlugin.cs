@@ -7,7 +7,7 @@ using HotReload;
 using MelonLoader;
 using MelonLoader.Utils;
 
-[assembly: MelonInfo(typeof(HotReloadPlugin), "HotReload", "0.3.0", "vergir")]
+[assembly: MelonInfo(typeof(HotReloadPlugin), "HotReload", "0.4.0", "vergir")]
 [assembly: MelonGame("Moon Studios", "NoRestForTheWicked")]
 // A plugin (Plugins/ folder) registers before any mod is loaded, which plugin mode and the preference hooks need.
 [assembly: MelonPriority(-10000)]
@@ -36,6 +36,8 @@ public class HotReloadPlugin : MelonPlugin
     private MelonPreferences_Entry<bool> _shadowCopy = null!;
     private MelonPreferences_Entry<bool> _replayScenes = null!;
     private MelonPreferences_Entry<bool> _reloadDependents = null!;
+    private MelonPreferences_Entry<bool> _retireOldBuild = null!;
+    private MelonPreferences_Entry<bool> _destroyPersistent = null!;
 
     private Reloader _reloader = null!;
     private int _key = UnityApi.NoKey; // UnityEngine.KeyCode as int
@@ -59,10 +61,12 @@ public class HotReloadPlugin : MelonPlugin
 
     public override void OnInitializeMelon()
     {
-        // Runs at application start: every mod is loaded by now and Unity types are usable.
+        // Runs at application start, before any mod's OnInitializeMelon: every mod is loaded and Unity types are usable.
+        UnityApi.InstallPersistentObjectTracking(HarmonyInstance, LoggerInstance);
         WatchConfigFile();
         _reloader = new Reloader(LoggerInstance, typeof(HotReloadPlugin).Assembly.GetName().Name!, IsIgnored,
-            replayScenes: () => _replayScenes.Value, reloadDependents: () => _reloadDependents.Value);
+            replayScenes: () => _replayScenes.Value, reloadDependents: () => _reloadDependents.Value,
+            retireOldBuild: () => _retireOldBuild.Value, destroyPersistent: () => _destroyPersistent.Value);
         CleanupOldFiles();
         StartupLoader.FixAllLocations();
         ApplyConfig();
@@ -90,6 +94,10 @@ public class HotReloadPlugin : MelonPlugin
             description: "After a reload, call the mod's OnSceneWasLoaded/OnSceneWasInitialized for the scenes that are already open.");
         _reloadDependents = _cat.CreateEntry("ReloadDependents", true,
             description: "When a mod reloads, also reload the loaded mods that reference it, so they call its new build.");
+        _retireOldBuild = _cat.CreateEntry("RetireOldBuild", true,
+            description: "After a reload, turn the old build's delegate targets and coroutine/async steps into no-ops, so callbacks, coroutines and timers it left behind stop instead of running old code.");
+        _destroyPersistent = _cat.CreateEntry("DestroyPersistentObjects", true,
+            description: "After a reload, destroy the GameObjects the old build passed to DontDestroyOnLoad (UI roots, canvases, EventSystems).");
         _cat.SaveToFile(false); // writes the file with defaults and descriptions on first run
     }
 

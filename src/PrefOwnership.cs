@@ -19,10 +19,6 @@ internal static class PrefOwnership
     // Category identifier -> simple name of the assembly that created it first. Another mod that merely looks the
     // category up via CreateCategory does not take it over, so reloading that mod leaves the category alone.
     private static readonly Dictionary<string, string> OwnerOf = new Dictionary<string, string>(StringComparer.Ordinal);
-    private static readonly HashSet<string> Infrastructure = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-    {
-        "MelonLoader", "0Harmony", "System.Private.CoreLib", typeof(PrefOwnership).Assembly.GetName().Name!,
-    };
 
     private static readonly FieldInfo? ReflectiveTypeField =
         typeof(MelonLoader.Preferences.MelonPreferences_ReflectiveCategory).GetField("SystemType", BindingFlags.Instance | BindingFlags.NonPublic);
@@ -57,24 +53,11 @@ internal static class PrefOwnership
     private static void Postfix(MelonPreferences_Category __result)
     {
         if (__result == null) return;
-        var owner = FindCallerAssembly();
+        var owner = Callers.FindModAssembly();
         if (owner == null) return;
         if (__result.Identifier != null && !OwnerOf.ContainsKey(__result.Identifier)) OwnerOf[__result.Identifier] = owner;
     }
 
-    private static string? FindCallerAssembly()
-    {
-        var frames = new StackTrace(1, false).GetFrames();
-        foreach (var f in frames)
-        {
-            var asm = f.GetMethod()?.DeclaringType?.Assembly;
-            if (asm == null || asm.IsDynamic) continue;
-            var name = asm.GetName().Name;
-            if (name == null || Infrastructure.Contains(name) || name.StartsWith("MonoMod", StringComparison.OrdinalIgnoreCase)) continue;
-            return name;
-        }
-        return null;
-    }
 
     /// <summary>
     /// Saves and empties the preference categories created by <paramref name="assemblyName"/>. Falls back to categories named

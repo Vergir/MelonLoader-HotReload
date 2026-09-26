@@ -32,13 +32,18 @@ internal sealed class Reloader
     private readonly Func<string, bool> _isIgnored;
     private readonly Func<bool> _replayScenes;
     private readonly Func<bool> _reloadDependents;
+    private readonly Func<bool> _retireOldBuild;
+    private readonly Func<bool> _destroyPersistent;
     private readonly Dictionary<string, string> _hash = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);   // assembly name -> SHA256 of the loaded bytes
     private readonly Dictionary<string, string> _source = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); // assembly name -> file it was loaded from
     private readonly HashSet<string> _warnedOnce = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     private int _generation;
 
-    public Reloader(MelonLogger.Instance log, string selfName, Func<string, bool> isIgnored, Func<bool> replayScenes, Func<bool> reloadDependents)
+    public Reloader(MelonLogger.Instance log, string selfName, Func<string, bool> isIgnored, Func<bool> replayScenes, Func<bool> reloadDependents,
+        Func<bool> retireOldBuild, Func<bool> destroyPersistent)
     {
+        _retireOldBuild = retireOldBuild;
+        _destroyPersistent = destroyPersistent;
         _log = log;
         _selfName = selfName;
         _isIgnored = isIgnored;
@@ -121,6 +126,8 @@ internal sealed class Reloader
             }
             // 1b. Patches the old build made through its own `new Harmony(...)` instances.
             RemoveRemainingPatches(name, oldAssemblies);
+            // 1c. What the old build left running: objects kept across scenes, delegates, coroutines.
+            RetireOldBuild(name, oldAssemblies, visited);
             // 2. Let the new build call CreateEntry / CreateCategory<T> again (values are kept in the preferences file).
             PrefOwnership.ReleaseCategories(name, melonNames, _log);
 
@@ -203,12 +210,41 @@ internal sealed class Reloader
             ForgetMelonAssembly(old);
         }
         RemoveRemainingPatches(name, oldAssemblies);
+        RetireOldBuild(name, oldAssemblies, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { name });
         PrefOwnership.ReleaseCategories(name, melonNames, _log);
         _hash.Remove(name);
         _source.Remove(name);
         Latest.Remove(name);
         _log.Msg("Unloaded " + name + " (its DLL was removed from Mods).");
         return true;
+    }
+
+    private void RetireOldBuild(string name, HashSet<Assembly> oldAssemblies, HashSet<string> visited)
+    {
+        var parts = new List<string>();
+        if (_destroyPersistent())
+        {
+            int destroyed = UnityApi.DestroyPersistentObjects(name, _log);
+            if (destroyed > 0) parts.Add("destroyed " + destroyed + " object(s) kept across scenes");
+        }
+        if (_retireOldBuild())
+        {
+            // A mod that references this one and is not reloaded with it would call into the retired build.
+            var stuck = MelonAssembly.LoadedAssemblies
+                .Where(a => !oldAssemblies.Contains(a.Assembly) && a.Assembly.GetReferencedAssemblies().Any(r => string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase)))
+                .Select(a => a.Assembly.GetName().Name!)
+                .Where(n => !visited.Contains(n) && (!_reloadDependents() || _isIgnored(n) || n == _selfName))
+                .ToList();
+            if (stuck.Count > 0)
+                parts.Add("old build NOT retired because " + string.Join(", ", stuck) + " still use it");
+            else
+                foreach (var asm in oldAssemblies)
+                {
+                    var (retired, failed, ms) = Retirer.Retire(asm, _log);
+                    if (retired + failed > 0) parts.Add("retired " + retired + " old method(s)" + (failed > 0 ? " (" + failed + " failed)" : "") + " in " + ms + " ms");
+                }
+        }
+        if (parts.Count > 0) _log.Msg(name + ": " + string.Join("; ", parts) + ".");
     }
 
     private static IEnumerable<MelonAssembly> FindLoaded(string name) =>

@@ -29,12 +29,15 @@ Created on first launch. Edits apply immediately, except `ShadowCopyMods`.
 | `ShadowCopyMods` | `true` | MelonLoader loads `Mods/*.dll` from copies in `UserData/HotReload/Shadow`, so the originals are never locked. Restart to apply. |
 | `ReplaySceneEvents` | `true` | After a reload, call the mod's `OnSceneWasLoaded` / `OnSceneWasInitialized` for scenes already open. |
 | `ReloadDependents` | `true` | After a mod reloads, reload the loaded mods that reference it. |
+| `RetireOldBuild` | `true` | Turn the old build's delegate targets and coroutine/async steps into no-ops after a reload (see below). |
+| `DestroyPersistentObjects` | `true` | Destroy the GameObjects the old build passed to `DontDestroyOnLoad`. |
 
 ## What a reload does
 
 1. `MelonAssembly.UnregisterMelons`: the mod's `OnDeinitializeMelon` runs, MelonLoader callbacks are unsubscribed, and its
    `HarmonyInstance` is unpatched.
 2. Every remaining Harmony patch whose patch method lives in the old assembly is removed, whatever Harmony instance made it.
+   Objects the old build kept across scenes are destroyed, and the old build is retired (next section).
 3. The mod's preference categories are saved and released, so the new build can create them again with the saved values.
    This covers plain categories and reflective `CreateCategory<T>` ones.
 4. The new DLL is loaded from bytes, with its `.pdb`, into its own `AssemblyLoadContext`. `Assembly.Location` reports the
@@ -43,22 +46,36 @@ Created on first launch. Edits apply immediately, except `ShadowCopyMods`.
 6. Scene callbacks are replayed for the scenes already open.
 7. Loaded mods that reference it are reloaded the same way, so they call the new build.
 
+## Retiring the old build
+
+Unregistering stops MelonLoader callbacks and Harmony patches, but the game can still call old code it was handed:
+UI listeners, settings rows, Il2Cpp delegates, coroutines, timers, tasks, event handlers. After a reload HotReload patches
+every such entry point of the old build with a prefix that skips the body and returns the default value:
+
+* every method the old build turned into a delegate, found by scanning its IL for `ldftn` / `ldvirtftn`;
+* every iterator and async state machine `MoveNext`, so coroutines end on their next step and pending async work stops.
+
+Stale behaviour stops instead of running old code against state that is gone. A leftover settings row or button does
+nothing until the game rebuilds that UI (reopen the screen). Typical mods have 0-15 such methods; large UI mods a few hundred.
+Retiring is skipped, with a log line, if a mod that references the old build is not being reloaded with it.
+
+Objects the old build passed to `DontDestroyOnLoad` (UI roots, canvases, EventSystems) are destroyed. HotReload learns
+the owner from the managed call stack when `DontDestroyOnLoad` is called; the game itself calls it natively, so only mods are tracked.
+
 ## Rules for mods that should hot-reload
 
-Only one thing is truly off-limits:
+Only one thing is off-limits:
 
 * **Il2Cpp class injection**: `ClassInjector.RegisterTypeInIl2Cpp`, `[RegisterTypeInIl2Cpp]`, or classes deriving from
   `MonoBehaviour` and other Il2Cpp types. Il2CppInterop refuses a second type with the same full name.
 
-Everything below keeps working after a reload but keeps running the **old** code unless the mod undoes it in `OnDeinitializeMelon`:
+What HotReload cannot undo, so the mod must in `OnDeinitializeMelon`:
 
-* GameObjects and components it created, `DontDestroyOnLoad` objects.
-* `MelonCoroutines.Start`: keep the token and `MelonCoroutines.Stop` it.
-* AssetBundles: loading the same bundle twice fails, so `Unload` it.
-* Callbacks handed to the game: `AddListener`, Il2Cpp delegates, event subscriptions, settings rows. The game may also rebuild that UI itself.
-* Hooks made outside Harmony: MonoMod `Hook`/`Detour`, native hooks.
-* Threads, timers, tasks, `FileSystemWatcher`, `AppDomain` events.
-* Game state the mod changed, such as static fields. Re-apply it in `OnInitializeMelon` instead, because the new build starts
+* **AssetBundles**: loading the same bundle twice fails, so `Unload` it.
+* **Hooks made outside Harmony** (MonoMod `Hook`/`Detour`, native hooks): dispose them. With retiring on, a hook left in
+  place would call a retired handler and the hooked function would return defaults.
+* **Loops on threads the mod started itself**: a call that is already running finishes; signal it to stop.
+* **Game state the mod changed**, such as static fields: re-apply it in `OnInitializeMelon`, because the new build starts
   with fresh static state.
 
 Other limits: old assemblies stay in memory, about the DLL's size per reload. `MelonPlugin`s and DLLs in `Mods/` subfolders or
@@ -77,9 +94,9 @@ dotnet checker/bin/Release/net8.0/HotReloadCheck.dll <dll-or-folder>... --md rep
 
 | Verdict | Meaning |
 |---|---|
-| READY | Nothing found that outlives a reload. |
-| REVIEW | Creates things that outlive a reload but has `OnDeinitializeMelon`; check that it undoes them. |
-| NEEDS CLEANUP | Creates things that outlive a reload and has no `OnDeinitializeMelon`. |
+| READY | Nothing found that HotReload cannot clean up. |
+| REVIEW | Uses something HotReload cannot clean up, but has `OnDeinitializeMelon`; check that it undoes it. |
+| NEEDS CLEANUP | Uses something HotReload cannot clean up and has no `OnDeinitializeMelon`. |
 | BLOCKED | Uses Il2Cpp class injection. |
 | PLUGIN | A `MelonPlugin`; not reloaded. |
 | UNSUPPORTED | Built for a Mono game, or for MelonLoader 0.5 (Unhollower). |
@@ -89,7 +106,8 @@ obfuscation. REVIEW means "read the cleanup code or try it".
 
 ## Test mods: `tests/`
 
-`HRTestBase` uses a separate Harmony instance, a reflective preference category and scene callbacks. `HRTestDependent`
+`HRTestBase` uses a separate Harmony instance, a reflective preference category, scene callbacks, a `DontDestroyOnLoad`
+object, an endless coroutine and a timer, and cleans up none of them. `HRTestDependent`
 references it. Build `tests/HRTestDependent` to deploy both, then rebuild `HRTestBase` with `-p:Version=1.0.1` while the game runs.
 
 ## How it works (MelonLoader 0.7.3 internals it relies on)
@@ -110,4 +128,5 @@ A MelonLoader update that renames `loadedAssemblies`, `_modDirs` or `SystemType`
 warning when it cannot find them.
 
 Source: `src/HotReloadPlugin.cs` (config, watchers, key), `src/Reloader.cs` (unload/load/dependents/Harmony cleanup),
-`src/StartupLoader.cs` (shadow copy, `Assembly.Location`), `src/PrefOwnership.cs`, `src/UnityApi.cs`.
+`src/StartupLoader.cs` (shadow copy, `Assembly.Location`), `src/Retirer.cs`, `src/PrefOwnership.cs`, `src/Callers.cs`,
+`src/UnityApi.cs` (Unity calls, `DontDestroyOnLoad` tracking).
