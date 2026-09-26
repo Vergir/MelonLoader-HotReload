@@ -26,8 +26,8 @@
 
   <ItemGroup>
     <!-- tests/ and checker/ are separate projects -->
-    <Compile Remove="tests/**;checker/**;mono/**" />
-    <None Remove="tests/**;checker/**;mono/**" />
+    <Compile Remove="tests/**;checker/**;mono/**;tools/**" />
+    <None Remove="tests/**;checker/**;mono/**;tools/**" />
   </ItemGroup>
 
   <ItemGroup>

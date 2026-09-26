@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Checks that every MelonLoader/Harmony/Il2CppInterop member a built HotReload.dll references exists in given MelonLoader releases.
+       Usage: dotnet run (project tools/ApiCompat), arguments: HotReload.dll path, then one MelonLoader/net6 or MelonLoader/net35 folder per release (from that release MelonLoader.x64.zip) -->
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+</Project>
