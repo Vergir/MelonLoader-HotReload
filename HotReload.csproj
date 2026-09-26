@@ -7,7 +7,7 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <AssemblyName>HotReload</AssemblyName>
     <RootNamespace>HotReload</RootNamespace>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <GenerateDependencyFile>false</GenerateDependencyFile>
     <DebugType>portable</DebugType>
@@ -26,9 +26,26 @@
     <Reference Include="UnityEngine.InputLegacyModule"><HintPath>$(InteropDir)\UnityEngine.InputLegacyModule.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
 
+  <!--
+    Deploy to <game>/Mods. A running game keeps the DLL it loaded at startup open: Windows refuses to overwrite it but
+    allows renaming it. So an existing copy is moved aside to *.hotreload-old (HotReload deletes those on the next launch)
+    and the new build is copied in, where HotReload picks it up. Copy this target into any mod you want to hot-reload.
+  -->
   <Target Name="DeployToGame" AfterTargets="Build" Condition="'$(DeployToGame)' == 'true' And Exists('$(GameDir)\Mods')">
-    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GameDir)\Mods" Retries="2" RetryDelayMilliseconds="500" ContinueOnError="true" />
-    <Message Importance="high" Text="$(AssemblyName).dll -> $(GameDir)\Mods" />
+    <PropertyGroup>
+      <_DeployStamp>$([System.DateTime]::UtcNow.Ticks)</_DeployStamp>
+    </PropertyGroup>
+    <ItemGroup>
+      <_DeployFile Include="$(TargetPath);$(TargetDir)$(TargetName).pdb" />
+      <_DeployFile Remove="@(_DeployFile)" Condition="!Exists('%(FullPath)')" />
+      <_DeployExisting Include="@(_DeployFile->'$(GameDir)\Mods\%(Filename)%(Extension)')" />
+      <_DeployExisting Remove="@(_DeployExisting)" Condition="!Exists('%(FullPath)')" />
+    </ItemGroup>
+    <Move SourceFiles="@(_DeployExisting)" DestinationFiles="@(_DeployExisting->'%(FullPath).$(_DeployStamp).hotreload-old')" ContinueOnError="true" />
+    <Copy SourceFiles="@(_DeployFile)" DestinationFolder="$(GameDir)\Mods" Retries="3" RetryDelayMilliseconds="300" ContinueOnError="true" />
+    <!-- Drop moved-aside copies nothing holds any more (fails silently for the ones the running game still has open). -->
+    <Exec Condition="'$(OS)' == 'Windows_NT'" Command="del /f /q &quot;$(GameDir)\Mods\*.hotreload-old&quot; 2&gt;nul" IgnoreExitCode="true" StandardOutputImportance="low" StandardErrorImportance="low" />
+    <Message Importance="high" Text="$(TargetFileName) -> $(GameDir)\Mods" />
   </Target>
 
 </Project>

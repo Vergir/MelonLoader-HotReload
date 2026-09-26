@@ -1,65 +1,96 @@
-# HotReload (dev tool, planned)
+# HotReload
 
-Goal: rebuild a mod and have the running game pick it up without a relaunch, like
-[BepInEx.AutoPlugin](https://github.com/Hamunii/BepInEx.AutoPlugin) does for BepInEx.
-No maintained MelonLoader equivalent exists (feature request open for years:
-[LavaGang/MelonLoader#438](https://github.com/LavaGang/MelonLoader/issues/438)), but MelonLoader 0.7.3 ships
-everything needed to write one in ~60 lines.
+MelonLoader mod for No Rest for the Wicked: rebuild a mod and the running game picks it up without a relaunch,
+like [AutoReload](https://github.com/Hamunii/AutoReload) does for BepInEx 5. Dev tool; tested in-game with
+MelonLoader 0.7.3 and MoreAspectRatios on 2026-09-26.
 
-## What MelonLoader already provides (from `<game>/MelonLoader/net6/MelonLoader.xml`, 0.7.3)
+## Use
 
-| API | What it does |
+1. `dotnet build -c Release` here once (deploys `HotReload.dll` to `<game>/Mods`), then start the game.
+2. Build any mod whose csproj has the deploy target below. HotReload sees the new DLL in `Mods/` and reloads it
+   (log: `[HotReload] Reloaded X 0.2.2 -> 0.2.3 (Harmony: 6 method(s) unpatched, 6 patched) in 450 ms`).
+3. **F8** reloads every mod whose DLL changed, for when auto reload is off or a file event was missed.
+
+Also handled: deleting a mod DLL from `Mods/` unloads that mod, and a new mod DLL dropped into `Mods/` is loaded.
+
+## Config: `<game>/UserData/HotReload.toml`
+
+Created on first launch. Edits apply immediately.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `AutoReload` | `true` | Reload as soon as a DLL changes. `false` = only the reload key. |
+| `ReloadKey` | `"F8"` | Any [`UnityEngine.KeyCode`](https://docs.unity3d.com/ScriptReference/KeyCode.html) name; `"None"` disables it. UnityExplorer uses F7. |
+| `ExtraWatchPaths` | `[]` | More folders (every `*.dll`) or DLL files to watch, e.g. a project's `bin/Release`. Relative paths are relative to the game folder. |
+| `Ignore` | `["UnityExplorer.ML.IL2CPP.CoreCLR"]` | Assembly names never reloaded. |
+| `DebounceMs` | `500` | Quiet time after the last file event before reloading. |
+
+## Deploy target for reloadable mods
+
+A running game keeps the DLLs it loaded at startup open. Windows refuses to overwrite such a file but allows renaming it.
+So the deploy step renames the old copy to `*.hotreload-old` and then copies the new build in. HotReload deletes those
+leftovers on the next launch, and so does the next build once nothing holds them. HotReload loads new builds from bytes,
+so after the first reload a mod's DLL is not locked at all. Copy this target from `HotReload.csproj` (MoreAspectRatios already has it):
+
+```xml
+<Target Name="DeployToGame" AfterTargets="Build" Condition="'$(DeployToGame)' == 'true' And Exists('$(GameDir)\Mods')">
+  <PropertyGroup>
+    <_DeployStamp>$([System.DateTime]::UtcNow.Ticks)</_DeployStamp>
+  </PropertyGroup>
+  <ItemGroup>
+    <_DeployFile Include="$(TargetPath);$(TargetDir)$(TargetName).pdb" />
+    <_DeployFile Remove="@(_DeployFile)" Condition="!Exists('%(FullPath)')" />
+    <_DeployExisting Include="@(_DeployFile->'$(GameDir)\Mods\%(Filename)%(Extension)')" />
+    <_DeployExisting Remove="@(_DeployExisting)" Condition="!Exists('%(FullPath)')" />
+  </ItemGroup>
+  <Move SourceFiles="@(_DeployExisting)" DestinationFiles="@(_DeployExisting->'%(FullPath).$(_DeployStamp).hotreload-old')" ContinueOnError="true" />
+  <Copy SourceFiles="@(_DeployFile)" DestinationFolder="$(GameDir)\Mods" Retries="3" RetryDelayMilliseconds="300" ContinueOnError="true" />
+  <Exec Condition="'$(OS)' == 'Windows_NT'" Command="del /f /q &quot;$(GameDir)\Mods\*.hotreload-old&quot; 2&gt;nul" IgnoreExitCode="true" StandardOutputImportance="low" StandardErrorImportance="low" />
+  <Message Importance="high" Text="$(TargetFileName) -> $(GameDir)\Mods" />
+</Target>
+```
+
+The `.pdb` is deployed too. HotReload loads it with the DLL, so exceptions from reloaded code keep file and line numbers.
+
+## Writing a mod that reloads cleanly
+
+What a reload does, in order:
+
+1. `MelonAssembly.UnregisterMelons`: your `OnDeinitializeMelon` runs, MelonLoader callbacks are unsubscribed, and
+   everything patched through the melon's `HarmonyInstance` is unpatched. HotReload logs a warning if patches remain.
+2. Your preference categories are saved and emptied, so the new build's `CreateEntry` calls succeed and read the saved values.
+   MelonLoader throws if an entry is created twice.
+3. The new DLL is loaded from bytes into its own `AssemblyLoadContext`. The default context refuses a second assembly
+   with the same name.
+4. Its melons are registered: `OnEarlyInitializeMelon`, Harmony auto-patching, `OnInitializeMelon`, `OnLateInitializeMelon`.
+   `OnSceneWasLoaded` does not fire for the scene that is already open.
+
+Rules that follow:
+
+* **Patch with `HarmonyInstance`**, auto-patching or `HarmonyInstance.PatchAll(...)`. A separate `new Harmony("id")` is not removed.
+* **Undo in `OnDeinitializeMelon`** whatever is not a Harmony patch and should not outlive the old build:
+  GameObjects and components you created, `MelonCoroutines` you started, event handlers on game objects,
+  static game fields you changed. Anything you do not undo keeps running the old code.
+* **Re-apply in `OnInitializeMelon` / the first `OnUpdate`** whatever the running game needs, because the new build
+  starts with fresh static state.
+* **No Il2Cpp class injection** (`ClassInjector.RegisterTypeInIl2Cpp`, `[RegisterTypeInIl2Cpp]`): a type cannot be registered twice.
+* **Preferences**: plain `MelonPreferences.CreateCategory` + `CreateEntry` work. Reflective categories
+  (`CreateCategory<T>`) are not handled.
+* UI rows or callbacks that the old build handed to the game, such as settings sliders, keep calling the old code until the game rebuilds them.
+* If mod A references mod B and both are reloaded, A binds to B's newest reloaded build. A mod that was never reloaded
+  keeps the startup build of B.
+* Old assemblies stay in memory; each reload costs the DLL's size. HotReload cannot reload itself; restart the game after rebuilding it.
+
+## How it works (MelonLoader 0.7.3 internals it relies on)
+
+| What | Where |
 |---|---|
-| `MelonBase.Unregister(string reason, bool silent)` | "Unregisters the Melon and all other Melons located in the same Assembly. Only unsubscribes the Melons from all callbacks and **unpatches all methods that were patched by Harmony**, but doesn't unload the assembly." |
-| `MelonAssembly.UnregisterMelons(string reason, bool silent)` | Same, for a whole `MelonAssembly`. |
-| `MelonAssembly.LoadRawMelonAssembly(string filePath, byte[] assemblyData, byte[] symbolsData, bool loadMelons)` | "Loads or finds a MelonAssembly from raw assembly data." With `loadMelons = true` the Melons in it are created and registered (OnInitializeMelon runs). Loading from bytes avoids the file lock that stops `dotnet build` from copying over a loaded DLL. |
-| `MelonAssembly.LoadMelonAssembly(string path, bool loadMelons)` | File variant (locks the file - not what we want). |
-| `MelonAssembly.LoadedMelons` | The Melons of an assembly (to find the old instance to unregister). |
-| `MelonBase.HarmonyInstance` | Per-mod Harmony instance; `Unregister` already calls `UnpatchSelf` on it. |
+| Mods are loaded with `AssemblyLoadContext.Default.LoadFromAssemblyPath`, which locks the file. | `MelonAssembly.LoadMelonAssembly(string)` |
+| `LoadMelonAssembly(path, assembly)` returns the cached `MelonAssembly` if one with the same `FullName` exists, so HotReload removes the old entry from the internal static `loadedAssemblies` list via reflection. | `MelonAssembly` |
+| `LoadMelons` only creates melons; `MelonBase.RegisterSorted` registers them. | `MelonAssembly`, `MelonBase` |
+| The melon Harmony id is `Assembly.FullName + ":" + Info.Name`; `UnregisterInstance` calls `HarmonyInstance.UnpatchSelf()`. | `MelonBase.Register` / `UnregisterInstance` |
+| `MelonPreferences_Category.CreateEntry` throws on duplicates. Category ownership is recorded by postfixes on every `CreateCategory` overload and the category constructor, which catches the owning assembly from the stack. MelonLoader creates its own categories before mods load, so the short overloads are already compiled with the long one inlined. Hooking only one overload missed MoreAspectRatios in testing. Categories named like the mod are the fallback. | `PrefOwnership.cs` |
+| MelonLoader's preferences file watcher ignores rename-style saves and swallows the first event after a save, so HotReload watches `HotReload.toml` itself. | `Preferences/IO/Watcher.cs` |
+| The game supports legacy `UnityEngine.Input` (UniverseLib logs "Initialized Legacy Input support"). | |
 
-.NET 6 note: `Assembly.Load(byte[])` of the same assembly name twice yields two independent `Assembly` objects in the
-default load context. That is fine; the old one just stays in memory (a few KB per reload). No `AssemblyLoadContext`
-unloading is needed and MelonLoader does not support it anyway.
-
-## Design
-
-`HotReload` is itself a Melon (Mod or Plugin) that:
-
-1. Reads a list of watched paths from `UserData/MelonPreferences.cfg` (`[HotReload] Paths = ["C:\...\mods\MoreAspectRatios\bin\Release\MoreAspectRatios.dll"]`)
-   and optionally a hotkey (default F6) and an "auto" flag (FileSystemWatcher).
-2. On trigger, for each watched DLL whose write time changed:
-   1. find the currently registered melons whose `MelonAssembly.Assembly.GetName().Name` matches the DLL's name;
-   2. call `melon.Unregister("HotReload", silent: true)` (Harmony patches removed, callbacks unsubscribed);
-   3. `MelonAssembly.LoadRawMelonAssembly(path, File.ReadAllBytes(path), File.Exists(pdb) ? File.ReadAllBytes(pdb) : null, loadMelons: true)`.
-3. Logs what it reloaded.
-
-Because the target mod's `bin/Release` DLL is watched directly, the mod's csproj post-build copy into `<game>/Mods` is
-irrelevant during a session (and it fails while the game runs anyway - that is expected).
-
-## Requirements on the mods being reloaded
-
-* **No Il2CppInterop class injection** (`ClassInjector.RegisterTypeInIl2Cpp`): injected types cannot be re-registered.
-  MoreAspectRatios does not use it. EnchantTooltip must not either if it wants hot reload.
-* **Re-applyable state**: whatever the mod changed in the game must be re-done in `OnInitializeMelon` / the first
-  `OnUpdate`, because the old instance is gone. MoreAspectRatios already re-applies everything in `ApplyEverything`.
-  Things it changed that are *not* Harmony patches persist across a reload (pipeline flag, PanelSettings modes,
-  the two static `s_force...` bools, the settings rows already added to a live settings screen).
-* **Static state** lives in the old assembly; the new one starts fresh. Cache nothing you cannot recompute.
-* `MelonPreferences.CreateCategory` with the same name is fine (returns the existing category).
-* Harmony patch classes are found via `HarmonyInstance.PatchAll(assembly)` - the new assembly's own instance,
-  so patches from the new build are applied under the same Harmony id after the old ones were removed.
-
-## Skeleton
-
-`HotReload.csproj` and `src/HotReloadMod.cs` are a compilable starting point (same csproj layout as MoreAspectRatios:
-references into `<game>/MelonLoader/net6` and `Il2CppAssemblies`, post-build copy to `<game>/Mods`).
-`OnUpdate` polls `Input.GetKeyDown` for the hotkey; a `FileSystemWatcher` is left as a TODO because Unity callbacks
-must run on the main thread (queue the event, act in `OnUpdate`).
-
-## Things to verify in the first session
-
-1. `LoadRawMelonAssembly` really registers and initializes the melons (check the log for the mod's "Patches applied").
-2. `Unregister` removes the Harmony patches (make a visible change, reload, confirm).
-3. Whether `MelonGame` attribute checks re-run and pass on the raw-loaded assembly.
-4. That the old assembly's Harmony id does not collide (MelonLoader creates the id from the mod's Info; if the new one
-   is rejected as "already registered", pass a different `reason`/`silent` combo or unregister via `MelonAssembly.UnregisterMelons`).
+Source: `src/HotReloadMod.cs` (config, watchers, key), `src/Reloader.cs` (unload/load), `src/PrefOwnership.cs`.
