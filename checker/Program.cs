@@ -333,7 +333,7 @@ internal static class Rules
 
         // ---- Needs cleanup in OnDeinitializeMelon --------------------------------------------------------------
         Add("coroutines", Severity.Cleanup, "Starts MelonCoroutines",
-            "Coroutines keep running the old code after a reload. Keep the returned token and call MelonCoroutines.Stop in OnDeinitializeMelon.",
+            "Only matters for coroutines that keep running (loops, long waits): they continue in the old build after a reload. One-shot coroutines that finish on their own are harmless. For long-running ones keep the token and call MelonCoroutines.Stop in OnDeinitializeMelon.",
             Refs(m => m.Type == "MelonLoader.MelonCoroutines" && m.Member == "Start"));
         Add("assetbundles", Severity.Cleanup, "Loads AssetBundles",
             "Loading the same bundle again fails while the old one is loaded. Call bundle.Unload(true/false) in OnDeinitializeMelon.",
