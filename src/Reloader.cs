@@ -116,7 +116,7 @@ internal sealed class Reloader
             // 1. Unregister the old build: OnDeinitializeMelon, callbacks unsubscribed, melon Harmony patches removed.
             var oldLoaded = FindLoaded(name).ToList();
             var oldAssemblies = new HashSet<Assembly>(oldLoaded.Select(a => a.Assembly));
-            var melonNames = oldLoaded.SelectMany(a => a.LoadedMelons).Select(m => m.Info.Name).ToList();
+            var oldMelons = oldLoaded.SelectMany(a => a.LoadedMelons).ToList();
             int patchedBefore = CountMethodsPatchedFrom(oldAssemblies);
             foreach (var old in oldLoaded)
             {
@@ -129,7 +129,7 @@ internal sealed class Reloader
             // 1c. What the old build left running: objects kept across scenes, delegates, coroutines.
             RetireOldBuild(name, oldAssemblies, visited);
             // 2. Let the new build call CreateEntry / CreateCategory<T> again (values are kept in the preferences file).
-            PrefOwnership.ReleaseCategories(name, melonNames, _log);
+            PrefOwnership.ReleaseCategories(name, oldAssemblies, oldMelons, _log);
 
             // 3. Load the new build from bytes into its own load context (no file lock; the default context refuses a second
             //    assembly with the same name).
@@ -202,7 +202,7 @@ internal sealed class Reloader
     {
         var loaded = FindLoaded(name).ToList();
         if (loaded.Count == 0) return false;
-        var melonNames = loaded.SelectMany(a => a.LoadedMelons).Select(m => m.Info.Name).ToList();
+        var oldMelons = loaded.SelectMany(a => a.LoadedMelons).ToList();
         var oldAssemblies = new HashSet<Assembly>(loaded.Select(a => a.Assembly));
         foreach (var old in loaded)
         {
@@ -211,7 +211,7 @@ internal sealed class Reloader
         }
         RemoveRemainingPatches(name, oldAssemblies);
         RetireOldBuild(name, oldAssemblies, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { name });
-        PrefOwnership.ReleaseCategories(name, melonNames, _log);
+        PrefOwnership.ReleaseCategories(name, oldAssemblies, oldMelons, _log);
         _hash.Remove(name);
         _source.Remove(name);
         Latest.Remove(name);

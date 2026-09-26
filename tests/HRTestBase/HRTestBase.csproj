@@ -1,4 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
+
+  <Import Project="..\..\Local.props" Condition="Exists('..\..\Local.props')" />
   <!-- Test fixture for HotReload, not a real mod. Build: dotnet build -c Release (deploys to <game>/Mods). -->
   <PropertyGroup>
     <TargetFramework>net6.0</TargetFramework>
@@ -9,7 +11,9 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <GenerateDependencyFile>false</GenerateDependencyFile>
     <DebugType>portable</DebugType>
-    <GameDir Condition="'$(GameDir)' == ''">C:\Games\Steam\steamapps\common\NoRestForTheWicked</GameDir>
+    <!-- Game with MelonLoader installed: set it in ..\..\Local.props (git-ignored, see Local.props.example),
+         with the MELONLOADER_GAME_DIR environment variable, or with dotnet build -p:GameDir=... -->
+    <GameDir Condition="'$(GameDir)' == ''">$(MELONLOADER_GAME_DIR)</GameDir>
     <MLDir>$(GameDir)\MelonLoader\net6</MLDir>
     <InteropDir>$(GameDir)\MelonLoader\Il2CppAssemblies</InteropDir>
     <DeployFolder>Mods</DeployFolder>
@@ -39,6 +43,10 @@
     <!-- Drop moved-aside copies nothing holds any more (fails silently for the ones the running game still has open). -->
     <Exec Condition="'$(OS)' == 'Windows_NT'" Command="del /f /q &quot;$(GameDir)\$(DeployFolder)\*.hotreload-old&quot; 2&gt;nul" IgnoreExitCode="true" StandardOutputImportance="low" StandardErrorImportance="low" />
     <Message Importance="high" Text="$(TargetFileName) -> $(GameDir)\$(DeployFolder)" />
+  </Target>
+
+  <Target Name="CheckGameDir" BeforeTargets="ResolveAssemblyReferences" Condition="!Exists('$(MLDir)\MelonLoader.dll')">
+    <Error Text="MelonLoader not found under GameDir '$(GameDir)'. Point GameDir at a game with MelonLoader 0.6+ installed and started once (so MelonLoader\Il2CppAssemblies exists): create Local.props from Local.props.example, set MELONLOADER_GAME_DIR, or pass -p:GameDir=..." />
   </Target>
 
 </Project>

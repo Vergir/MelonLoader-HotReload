@@ -40,6 +40,13 @@ public class HRTestBaseMod : MelonMod
 
         LoggerInstance.Msg(Greeting() + ", init #" + cfg.InitCount + ", Assembly.Location='" + typeof(HRTestBaseMod).Assembly.Location + "'");
 
+        // A plain category whose name has nothing to do with the mod: found through this static field on reload.
+        var settings = MelonPreferences.CreateCategory("HRTest Unrelated Name");
+        _reloads = settings.CreateEntry("Reloads", 0);
+        _reloads.Value++;
+        settings.SaveToFile(false);
+        LoggerInstance.Msg("plain category entry Reloads = " + _reloads.Value);
+
         var go = new GameObject(PersistentName);
         Object.DontDestroyOnLoad(go);
         MelonCoroutines.Start(Ticker());
@@ -47,6 +54,7 @@ public class HRTestBaseMod : MelonMod
         _timer = new System.Threading.Timer(_ => MelonLogger.Msg("[HRTestBase] timer from " + build), null, 3000, 3000);
     }
 
+    private static MelonPreferences_Entry<int> _reloads = null!;
     private const string PersistentName = "HRTestBase_Persistent";
     private static System.Threading.Timer? _timer; // no cleanup on purpose
     private int _frames;

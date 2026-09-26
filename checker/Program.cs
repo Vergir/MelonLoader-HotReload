@@ -7,7 +7,7 @@ using System.Text;
 namespace HotReloadCheck;
 
 /// <summary>
-/// Scans compiled MelonLoader mods (no source needed) and reports whether they can be hot-reloaded by HotReload 0.4,
+/// Scans compiled MelonLoader mods (no source needed) and reports whether they can be hot-reloaded by HotReload 0.5,
 /// and what the author would have to add. It reads metadata only: which APIs a mod references, which types it
 /// defines and which callbacks it overrides. It does not execute or load anything.
 ///
@@ -345,7 +345,7 @@ internal static class Rules
             "A loop already running on a thread keeps running after a reload; retiring only stops later calls. Signal it to stop in OnDeinitializeMelon.",
             Refs(m => m.Type == "System.Threading.Thread" && m.Member == ".ctor"));
 
-        // ---- Handled by HotReload 0.4 (informational) ----------------------------------------------------------
+        // ---- Handled by HotReload 0.5 (informational) ----------------------------------------------------------
         Add("coroutines", Severity.Info, "Starts MelonCoroutines",
             "Handled: the old build's coroutine steps are retired, so its coroutines end on their next step.",
             Refs(m => m.Type == "MelonLoader.MelonCoroutines" && m.Member == "Start"));
@@ -426,7 +426,7 @@ internal static class Output
         var sb = new StringBuilder();
         sb.AppendLine("# HotReload compatibility report");
         sb.AppendLine();
-        sb.AppendLine("Static scan of compiled DLLs (metadata only), against HotReload 0.4. \"Cleanup\" findings are things HotReload cannot undo itself; " +
+        sb.AppendLine("Static scan of compiled DLLs (metadata only), against HotReload 0.5. \"Cleanup\" findings are things HotReload cannot undo itself; " +
                       "whether the mod's OnDeinitializeMelon undoes them needs a look at the code or a test.");
         sb.AppendLine();
         sb.AppendLine("| Mod | Version | Author | Kind | Verdict | Cleanup items | Handled | Depends on |");

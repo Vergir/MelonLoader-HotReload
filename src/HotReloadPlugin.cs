@@ -3,13 +3,17 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using HotReload;
 using MelonLoader;
 using MelonLoader.Utils;
 
-[assembly: MelonInfo(typeof(HotReloadPlugin), "HotReload", "0.4.0", "vergir")]
-[assembly: MelonGame("Moon Studios", "NoRestForTheWicked")]
-// A plugin (Plugins/ folder) registers before any mod is loaded, which plugin mode and the preference hooks need.
+[assembly: MelonInfo(typeof(HotReloadPlugin), "HotReload", "0.5.0", "vergir")]
+// No MelonGame attribute: works in any IL2CPP game. Every API it binds to exists since MelonLoader 0.6.0
+// (checked against the 0.6.0-0.7.3 release binaries); shadow-copying Mods/ needs 0.7.1+.
+[assembly: MelonPlatformDomain(MelonPlatformDomainAttribute.CompatibleDomains.IL2CPP)]
+[assembly: VerifyLoaderVersion(0, 6, 0, true)]
+// A plugin (Plugins/ folder) registers before any mod is loaded, which the shadow copy of Mods/ needs.
 [assembly: MelonPriority(-10000)]
 // No [HarmonyPatch] classes; hooks are applied by hand.
 [assembly: HarmonyDontPatchAll]
@@ -40,7 +44,10 @@ public class HotReloadPlugin : MelonPlugin
     private MelonPreferences_Entry<bool> _destroyPersistent = null!;
 
     private Reloader _reloader = null!;
-    private int _key = UnityApi.NoKey; // UnityEngine.KeyCode as int
+    private KeyInput _keys = null!;
+    private MelonPreferences_Entry<string> _inputBackend = null!;
+    private bool _locationPatched;
+    private string _shadowStatus = "off";
     private readonly List<FileSystemWatcher> _watchers = new List<FileSystemWatcher>();
     // Written by watcher threads, drained on the main thread: full path -> time of the last event.
     private readonly ConcurrentDictionary<string, DateTime> _pending = new ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
@@ -54,15 +61,16 @@ public class HotReloadPlugin : MelonPlugin
     {
         // Runs while plugins register, before MelonLoader loads any mod.
         CreatePreferences();
-        PrefOwnership.Install(HarmonyInstance, LoggerInstance);
-        StartupLoader.InstallLocationPatch(HarmonyInstance, LoggerInstance);
-        if (_shadowCopy.Value) StartupLoader.InstallShadowMods(LoggerInstance);
+        // Each feature degrades on its own: a missing MelonLoader internal disables that feature with a warning.
+        _locationPatched = StartupLoader.InstallLocationPatch(HarmonyInstance, LoggerInstance);
+        if (_shadowCopy.Value) _shadowStatus = StartupLoader.InstallShadowMods(LoggerInstance);
     }
 
     public override void OnInitializeMelon()
     {
         // Runs at application start, before any mod's OnInitializeMelon: every mod is loaded and Unity types are usable.
-        UnityApi.InstallPersistentObjectTracking(HarmonyInstance, LoggerInstance);
+        bool ddol = UnityApi.InstallPersistentObjectTracking(HarmonyInstance, LoggerInstance);
+        _keys = new KeyInput(LoggerInstance);
         WatchConfigFile();
         _reloader = new Reloader(LoggerInstance, typeof(HotReloadPlugin).Assembly.GetName().Name!, IsIgnored,
             replayScenes: () => _replayScenes.Value, reloadDependents: () => _reloadDependents.Value,
@@ -71,6 +79,9 @@ public class HotReloadPlugin : MelonPlugin
         StartupLoader.FixAllLocations();
         ApplyConfig();
         _reloader.Snapshot(WatchedFiles());
+        LoggerInstance.Msg("MelonLoader " + LoaderVersion() + ", .NET " + Environment.Version + ". Shadow copy: " + _shadowStatus
+                           + "; Assembly.Location patch: " + (_locationPatched ? "on" : "off")
+                           + "; DontDestroyOnLoad tracking: " + (ddol ? "on" : "off") + "; reload key: " + _keys.Describe() + ".");
         if (_shadowCopy.Value) LoggerInstance.Msg(StartupLoader.Describe());
     }
 
@@ -98,6 +109,8 @@ public class HotReloadPlugin : MelonPlugin
             description: "After a reload, turn the old build's delegate targets and coroutine/async steps into no-ops, so callbacks, coroutines and timers it left behind stop instead of running old code.");
         _destroyPersistent = _cat.CreateEntry("DestroyPersistentObjects", true,
             description: "After a reload, destroy the GameObjects the old build passed to DontDestroyOnLoad (UI roots, canvases, EventSystems).");
+        _inputBackend = _cat.CreateEntry("InputBackend", "Auto",
+            description: "How the reload key is read: Auto (legacy Input, then Input System, then Windows key state), Legacy, InputSystem or Windows.");
         _cat.SaveToFile(false); // writes the file with defaults and descriptions on first run
     }
 
@@ -118,11 +131,11 @@ public class HotReloadPlugin : MelonPlugin
             catch (Exception e) { LoggerInstance.Warning("Could not re-read " + ConfigFileName + ": " + e.Message); }
         }
         if (_configDirty) { _configDirty = false; ApplyConfig(); }
-        if (_watcherFailed) { _watcherFailed = false; LoggerInstance.Warning("File watcher overflowed or failed; restarting it. Press " + UnityApi.KeyName(_key) + " if a change was missed."); ApplyConfig(force: true); }
+        if (_watcherFailed) { _watcherFailed = false; LoggerInstance.Warning("File watcher overflowed or failed; restarting it. Press " + _keys.KeyName + " if a change was missed."); ApplyConfig(force: true); }
 
-        if (UnityApi.KeyDown(_key))
+        if (_keys.Pressed())
         {
-            LoggerInstance.Msg(UnityApi.KeyName(_key) + ": checking watched DLLs");
+            LoggerInstance.Msg(_keys.KeyName + ": checking watched DLLs");
             int n = 0;
             foreach (var file in WatchedFiles())
                 if (_reloader.ProcessFile(file) == Reloader.Result.Reloaded) n++;
@@ -183,16 +196,11 @@ public class HotReloadPlugin : MelonPlugin
     private void ApplyConfig(bool force = false)
     {
         // MelonLoader re-reads the file after every save (ours included); only act on real changes.
-        var signature = string.Join("|", _autoReload.Value, _reloadKey.Value, string.Join(";", _extraWatchPaths.Value ?? Array.Empty<string>()));
+        var signature = string.Join("|", _autoReload.Value, _reloadKey.Value, _inputBackend.Value, string.Join(";", _extraWatchPaths.Value ?? Array.Empty<string>()));
         if (!force && signature == _appliedConfig) return;
         _appliedConfig = signature;
 
-        var keyName = (_reloadKey.Value ?? "").Trim();
-        if (!UnityApi.TryParseKey(keyName, out _key))
-        {
-            LoggerInstance.Warning("Unknown ReloadKey '" + keyName + "', using F8.");
-            UnityApi.TryParseKey("F8", out _key);
-        }
+        _keys.Configure(_reloadKey.Value ?? "F8", _inputBackend.Value ?? "Auto");
 
         foreach (var w in _watchers) w.Dispose();
         _watchers.Clear();
@@ -225,7 +233,7 @@ public class HotReloadPlugin : MelonPlugin
         }
 
         LoggerInstance.Msg("Auto reload " + (_autoReload.Value ? "on (" + string.Join(", ", WatchTargets().Select(t => Path.Combine(t.dir, t.filter))) + ")" : "off")
-                           + ", reload key " + UnityApi.KeyName(_key) + ". Config: UserData/" + ConfigFileName);
+                           + ", reload key " + _keys.Describe() + ". Config: UserData/" + ConfigFileName);
     }
 
     private void Queue(string fullPath)
@@ -269,5 +277,14 @@ public class HotReloadPlugin : MelonPlugin
                 }
         }
         catch (Exception e) { LoggerInstance.Warning("Cleanup of *" + OldFileSuffix + " failed: " + e.Message); }
+    }
+
+    /// <summary>MelonLoader's version: a const field in 0.6, a static property in 0.7.</summary>
+    private static string LoaderVersion()
+    {
+        var info = typeof(MelonAssembly).Assembly.GetType("MelonLoader.Properties.BuildInfo");
+        object? v = info?.GetProperty("Version", BindingFlags.Public | BindingFlags.Static)?.GetValue(null)
+                    ?? info?.GetField("Version", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+        return v?.ToString() ?? typeof(MelonAssembly).Assembly.GetName().Version?.ToString() ?? "?";
     }
 }

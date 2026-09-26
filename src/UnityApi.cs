@@ -61,16 +61,18 @@ internal static class UnityApi
         new Dictionary<string, List<UnityEngine.Object>>(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Needs Il2Cpp support to be set up (OnApplicationStart), and must run before mods' OnInitializeMelon.</summary>
-    public static void InstallPersistentObjectTracking(HarmonyLib.Harmony harmony, MelonLogger.Instance log)
+    public static bool InstallPersistentObjectTracking(HarmonyLib.Harmony harmony, MelonLogger.Instance log)
     {
         try
         {
             var original = AccessTools.Method(typeof(UnityEngine.Object), nameof(UnityEngine.Object.DontDestroyOnLoad), new[] { typeof(UnityEngine.Object) });
             harmony.Patch(original, postfix: new HarmonyMethod(typeof(UnityApi).GetMethod(nameof(DontDestroyOnLoadPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
+            return true;
         }
         catch (Exception e)
         {
             log.Warning("Could not hook DontDestroyOnLoad; objects a reloaded mod kept across scenes will stay: " + e.Message);
+            return false;
         }
     }
 

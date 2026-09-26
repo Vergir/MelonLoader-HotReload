@@ -1,79 +1,51 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
-using HarmonyLib;
 using MelonLoader;
+using MelonLoader.Preferences;
 
 namespace HotReload;
 
 /// <summary>
 /// MelonPreferences_Category.CreateEntry throws when the entry already exists, so a reloaded mod would crash in its
-/// OnInitializeMelon. We record which assembly created each category (postfix on MelonPreferences.CreateCategory) and,
-/// before a reload, save that mod's categories and empty their entry lists. The values stay in the preferences file,
-/// so the new build's CreateEntry picks them up again.
+/// OnInitializeMelon. Before a reload HotReload finds the old build's preference categories, saves them and empties
+/// their entry lists; the values stay in the preferences file, so the new build's CreateEntry picks them up again.
+///
+/// Finding them cannot use Harmony hooks on MelonPreferences: MelonLoader marks its own assembly with [PatchShield],
+/// which silently skips every patch on its methods. Instead the categories are found through
+///  1. the old build's own fields: static fields of its types and instance fields of its melons that hold a
+///     category, an entry, a reflective category, or a collection of those (how mods keep their settings);
+///  2. reflective categories (CreateCategory&lt;T&gt;) whose T lives in the old build;
+///  3. categories named like the assembly or one of its melons (entries created and never stored).
 /// </summary>
 internal static class PrefOwnership
 {
-    // Category identifier -> simple name of the assembly that created it first. Another mod that merely looks the
-    // category up via CreateCategory does not take it over, so reloading that mod leaves the category alone.
-    private static readonly Dictionary<string, string> OwnerOf = new Dictionary<string, string>(StringComparer.Ordinal);
-
     private static readonly FieldInfo? ReflectiveTypeField =
-        typeof(MelonLoader.Preferences.MelonPreferences_ReflectiveCategory).GetField("SystemType", BindingFlags.Instance | BindingFlags.NonPublic);
+        typeof(MelonPreferences_ReflectiveCategory).GetField("SystemType", BindingFlags.Instance | BindingFlags.NonPublic);
 
-    public static void Install(HarmonyLib.Harmony harmony, MelonLogger.Instance log)
-    {
-        // Every overload plus the constructor: MelonLoader calls CreateCategory for its own categories before any mod loads,
-        // so the short overloads are already JIT-compiled with the long one inlined, and a patch on one overload is not enough.
-        var targets = new List<MethodBase>();
-        targets.AddRange(typeof(MelonPreferences).GetMethods(BindingFlags.Public | BindingFlags.Static)
-            .Where(m => m.Name == nameof(MelonPreferences.CreateCategory) && !m.IsGenericMethodDefinition && m.ReturnType == typeof(MelonPreferences_Category)));
-        targets.AddRange(typeof(MelonPreferences_Category).GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic));
-        int ok = 0;
-        foreach (var t in targets)
-        {
-            try
-            {
-                var postfix = t is ConstructorInfo ? nameof(CtorPostfix) : nameof(Postfix);
-                harmony.Patch(t, postfix: new HarmonyMethod(typeof(PrefOwnership).GetMethod(postfix, BindingFlags.Static | BindingFlags.NonPublic)));
-                ok++;
-            }
-            catch (Exception e)
-            {
-                log.Warning("Could not hook " + t.DeclaringType?.Name + "." + t.Name + ": " + e.Message);
-            }
-        }
-        if (ok == 0) log.Warning("No preference hooks; reloading a mod that creates preference entries falls back to matching category names.");
-    }
+    private static int _warnedReflective;
 
-    private static void CtorPostfix(MelonPreferences_Category __instance) => Postfix(__instance);
-
-    private static void Postfix(MelonPreferences_Category __result)
-    {
-        if (__result == null) return;
-        var owner = Callers.FindModAssembly();
-        if (owner == null) return;
-        if (__result.Identifier != null && !OwnerOf.ContainsKey(__result.Identifier)) OwnerOf[__result.Identifier] = owner;
-    }
-
-
-    /// <summary>
-    /// Saves and empties the preference categories created by <paramref name="assemblyName"/>. Falls back to categories named
-    /// like the assembly or one of its melons when no ownership was recorded.
-    /// </summary>
-    public static void ReleaseCategories(string assemblyName, IEnumerable<string> melonNames, MelonLogger.Instance log)
+    public static void ReleaseCategories(string assemblyName, ICollection<Assembly> oldAssemblies, ICollection<MelonBase> oldMelons, MelonLogger.Instance log)
     {
         var ids = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var kv in OwnerOf)
-            if (string.Equals(kv.Value, assemblyName, StringComparison.OrdinalIgnoreCase)) ids.Add(kv.Key);
-        if (ids.Count == 0)
-        {
-            foreach (var cat in MelonPreferences.Categories)
-                if (string.Equals(cat.Identifier, assemblyName, StringComparison.OrdinalIgnoreCase) || melonNames.Contains(cat.Identifier, StringComparer.OrdinalIgnoreCase))
-                    ids.Add(cat.Identifier);
-        }
+        var reflective = new HashSet<MelonPreferences_ReflectiveCategory>();
+
+        // 1. What the old build holds in its fields.
+        foreach (var value in HeldPreferenceObjects(oldAssemblies, oldMelons))
+            Collect(value, ids, reflective, depth: 0);
+
+        // 2. Reflective categories typed with the old build's classes.
+        if (ReflectiveTypeField == null && MelonPreferences.ReflectiveCategories.Count > 0 && _warnedReflective++ == 0)
+            log.Warning("MelonPreferences_ReflectiveCategory.SystemType not found in this MelonLoader; reflective categories are only found through fields.");
+        foreach (var rc in MelonPreferences.ReflectiveCategories)
+            if (ReflectiveTypeField?.GetValue(rc) is Type t && oldAssemblies.Contains(t.Assembly)) reflective.Add(rc);
+
+        // 3. Categories named like the mod.
+        var names = new HashSet<string>(oldMelons.Select(m => m.Info.Name).Append(assemblyName), StringComparer.OrdinalIgnoreCase);
+        foreach (var cat in MelonPreferences.Categories)
+            if (names.Contains(cat.Identifier)) ids.Add(cat.Identifier);
 
         var released = new List<string>();
         foreach (var id in ids)
@@ -85,17 +57,80 @@ internal static class PrefOwnership
             released.Add(id + " (" + cat.Entries.Count + ")");
             cat.Entries.Clear();
         }
-        // Reflective categories (CreateCategory<T>) are never looked up again: MelonLoader constructs a new one on every
+        // Reflective categories are never looked up again: MelonLoader constructs a new one on every CreateCategory<T>
         // call, so the old one (typed with the old build's T) would fight the new one over the same file section.
-        foreach (var rc in MelonPreferences.ReflectiveCategories.ToList())
+        foreach (var rc in reflective)
         {
-            var type = ReflectiveTypeField?.GetValue(rc) as Type;
-            if (type == null || !string.Equals(type.Assembly.GetName().Name, assemblyName, StringComparison.OrdinalIgnoreCase)) continue;
+            if (!MelonPreferences.ReflectiveCategories.Contains(rc)) continue;
             try { rc.SaveToFile(false); }
             catch (Exception e) { log.Warning("Saving preferences of " + rc.Identifier + " failed: " + e.Message); }
             MelonPreferences.ReflectiveCategories.Remove(rc);
             released.Add(rc.Identifier + " (reflective)");
         }
         if (released.Count > 0) log.Msg("Released preference entries of " + string.Join(", ", released));
+    }
+
+    private static bool IsPreferenceType(Type t)
+    {
+        if (typeof(MelonPreferences_Category).IsAssignableFrom(t) || typeof(MelonPreferences_Entry).IsAssignableFrom(t)
+            || typeof(MelonPreferences_ReflectiveCategory).IsAssignableFrom(t)) return true;
+        if (t.IsArray) return IsPreferenceType(t.GetElementType()!);
+        if (t.IsGenericType && typeof(IEnumerable).IsAssignableFrom(t))
+            return t.GetGenericArguments().Any(IsPreferenceType); // List<Entry>, Dictionary<string, Entry>, ...
+        return false;
+    }
+
+    /// <summary>
+    /// Values of the old build's fields that hold preference objects. Only fields whose declared type is a preference
+    /// type are read, so the static constructors of unrelated old types are not triggered.
+    /// </summary>
+    private static IEnumerable<object> HeldPreferenceObjects(ICollection<Assembly> assemblies, ICollection<MelonBase> melons)
+    {
+        const BindingFlags statics = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+        const BindingFlags instance = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+        foreach (var asm in assemblies)
+        {
+            Type?[] types;
+            try { types = asm.GetTypes(); }
+            catch (ReflectionTypeLoadException e) { types = e.Types; }
+            foreach (var type in types)
+            {
+                if (type == null || type.ContainsGenericParameters) continue;
+                FieldInfo[] fields;
+                try { fields = type.GetFields(statics); } catch { continue; }
+                foreach (var f in fields)
+                {
+                    if (f.IsLiteral || !IsPreferenceType(f.FieldType)) continue;
+                    object? v = null;
+                    try { v = f.GetValue(null); } catch { /* type initializer failed */ }
+                    if (v != null) yield return v;
+                }
+            }
+        }
+        foreach (var melon in melons)
+        {
+            for (var t = melon.GetType(); t != null && t != typeof(MelonMod) && t != typeof(MelonPlugin) && t != typeof(MelonBase); t = t.BaseType)
+            {
+                foreach (var f in t.GetFields(instance))
+                {
+                    if (!IsPreferenceType(f.FieldType)) continue;
+                    object? v = null;
+                    try { v = f.GetValue(melon); } catch { }
+                    if (v != null) yield return v;
+                }
+            }
+        }
+    }
+
+    private static void Collect(object value, HashSet<string> ids, HashSet<MelonPreferences_ReflectiveCategory> reflective, int depth)
+    {
+        switch (value)
+        {
+            case MelonPreferences_Category c: if (c.Identifier != null) ids.Add(c.Identifier); break;
+            case MelonPreferences_Entry e: if (e.Category?.Identifier != null) ids.Add(e.Category.Identifier); break;
+            case MelonPreferences_ReflectiveCategory r: reflective.Add(r); break;
+            case IDictionary d when depth < 2: foreach (var v in d.Values) if (v != null) Collect(v, ids, reflective, depth + 1); break;
+            case IEnumerable list when depth < 2 && value is not string: foreach (var v in list) if (v != null) Collect(v, ids, reflective, depth + 1); break;
+        }
     }
 }

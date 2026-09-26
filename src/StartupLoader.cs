@@ -16,9 +16,9 @@ namespace HotReload;
 /// per-session shadow folder and swaps that folder into MelonLoader's list of mod folders. MelonLoader locks the copies;
 /// the originals stay free for builds, and HotReload maps every path back to Mods/.
 ///
-/// Redirecting MelonAssembly.LoadMelonAssembly(string, bool) with a Harmony prefix does not work: the game runs on the
-/// installed .NET runtime (10.x), whose JIT inlines that method into MelonLoader's folder loader, which is already
-/// compiled (for UserLibs) before any plugin can patch it. The folder list is plain data read later, so it is reliable.
+/// Redirecting MelonAssembly.LoadMelonAssembly(string, bool) with a Harmony prefix does not work: MelonLoader marks its
+/// own assembly with [PatchShield] (every release since 0.6.0), which silently skips any patch on its methods. The
+/// folder list is plain data read later, so changing it needs no patch.
 /// </summary>
 internal static class StartupLoader
 {
@@ -33,7 +33,7 @@ internal static class StartupLoader
     /// <summary>Makes Assembly.Location of <paramref name="asm"/> return <paramref name="path"/>.</summary>
     public static void RememberLocation(Assembly asm, string path) => Locations.AddOrUpdate(asm, path);
 
-    public static void InstallLocationPatch(HarmonyLib.Harmony harmony, MelonLogger.Instance log)
+    public static bool InstallLocationPatch(HarmonyLib.Harmony harmony, MelonLogger.Instance log)
     {
         _log = log;
         try
@@ -47,6 +47,7 @@ internal static class StartupLoader
         {
             log.Warning("Could not patch Assembly.Location; reloaded mods will see an empty Location: " + e.Message);
         }
+        return _locationPatched;
     }
 
     private static void LocationPostfix(Assembly __instance, ref string __result)
@@ -54,19 +55,25 @@ internal static class StartupLoader
         if (Locations.TryGetValue(__instance, out var path)) __result = path;
     }
 
-    /// <summary>Called while plugins register, before MelonLoader scans Mods/.</summary>
-    public static void InstallShadowMods(MelonLogger.Instance log)
+    /// <summary>Called while plugins register, before MelonLoader scans Mods/. Returns a status for the log.</summary>
+    public static string InstallShadowMods(MelonLogger.Instance log)
     {
         _log = log;
         try
         {
-            var handler = typeof(MelonAssembly).Assembly.GetType("MelonLoader.Melons.MelonFolderHandler", throwOnError: true)!;
-            var field = handler.GetField("_modDirs", BindingFlags.NonPublic | BindingFlags.Static)
-                        ?? throw new MissingFieldException("MelonFolderHandler._modDirs");
+            var field = typeof(MelonAssembly).Assembly.GetType("MelonLoader.Melons.MelonFolderHandler", throwOnError: false)
+                ?.GetField("_modDirs", BindingFlags.NonPublic | BindingFlags.Static);
+            if (field == null)
+            {
+                // MelonLoader 0.6.x / 0.7.0 keep the mod folder list in a local variable.
+                log.Warning("This MelonLoader has no MelonFolderHandler._modDirs (added in 0.7.1), so Mods/*.dll stay locked while the game runs. " +
+                            "Deploy builds with the rename-then-copy step from the README, or update MelonLoader.");
+                return "unavailable (needs MelonLoader 0.7.1+)";
+            }
             var dirs = (List<string>)field.GetValue(null)!;
             var mods = Path.GetFullPath(MelonEnvironment.ModsDirectory).TrimEnd('\\', '/');
             int idx = dirs.FindIndex(d => string.Equals(Path.GetFullPath(d).TrimEnd('\\', '/'), mods, StringComparison.OrdinalIgnoreCase));
-            if (idx < 0) { log.Warning("Mods folder not in MelonLoader's folder list; mod DLLs stay locked."); return; }
+            if (idx < 0) { log.Warning("Mods folder not in MelonLoader's folder list; mod DLLs stay locked."); return "unavailable (Mods not in folder list)"; }
 
             var root = Path.Combine(MelonEnvironment.UserDataDirectory, "HotReload", "Shadow");
             Directory.CreateDirectory(root);
@@ -88,10 +95,12 @@ internal static class StartupLoader
             // Map paths back as soon as MelonLoader has an Assembly / a melon, before mods run any code.
             MelonAssembly.OnAssemblyResolving.Subscribe(OnAssemblyResolving);
             MelonBase.OnMelonInitializing.Subscribe(OnMelonInitializing);
+            return "on";
         }
         catch (Exception e)
         {
             log.Warning("Could not shadow-copy Mods/; mod DLLs stay locked while the game runs, so builds need the rename-then-copy deploy step: " + e.Message);
+            return "failed (" + e.Message + ")";
         }
     }
 
