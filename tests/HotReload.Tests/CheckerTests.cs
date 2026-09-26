@@ -29,6 +29,25 @@ public class CheckerTests
         Assert.Equal("NEEDS CLEANUP", Rules.Evaluate(Mod(LoadBundle)).Verdict);
 
     [Fact]
+    public void Bundles_and_hooks_kept_in_fields_are_handled()
+    {
+        var s = Mod(LoadBundle, MonoModHook);
+        s.FieldTypes.Add("UnityEngine.AssetBundle");
+        s.FieldTypes.Add("MonoMod.RuntimeDetour.Hook");
+        var r = Rules.Evaluate(s);
+        Assert.Equal("READY", r.Verdict);
+        Assert.All(r.Findings.Where(f => f.Id is "assetbundles" or "nativehooks"), f => Assert.Equal(Severity.Info, f.Severity));
+    }
+
+    [Fact]
+    public void Field_types_are_read_from_metadata_including_generic_arguments()
+    {
+        var s = ModScan.Read(typeof(CheckerTests).Assembly.Location)!;
+        Assert.Contains("MonoMod.RuntimeDetour.Hook", s.FieldTypes);          // HookSamples.KeptHook
+        Assert.Contains("HotReload.Tests.FakeAssetBundle", s.FieldTypes);    // inside List<FakeAssetBundle>
+    }
+
+    [Fact]
     public void Cleanup_items_with_OnDeinitializeMelon_need_review()
     {
         var s = Mod(LoadBundle, MonoModHook);

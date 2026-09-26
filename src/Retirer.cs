@@ -69,14 +69,15 @@ internal static class Retirer
         catch { return false; }
     }
 
-    public static (int retired, int replaced, int unrunnable, int failed, long ms) Retire(Assembly asm, IEnumerable<Type> wholeTypes, MelonLogger.Instance log)
+    public static (int retired, int replaced, int unrunnable, int failed, Analysis analysis, long ms) Retire(Assembly asm, IEnumerable<Type> wholeTypes, MelonLogger.Instance log)
     {
         var sw = Stopwatch.StartNew();
         _harmony ??= new HarmonyLib.Harmony("HotReload.retire");
         _skipPrefix ??= new HarmonyLib.HarmonyMethod(typeof(Retirer).GetMethod(nameof(Skip), BindingFlags.Static | BindingFlags.NonPublic));
         _replaceBody ??= new HarmonyLib.HarmonyMethod(typeof(Retirer).GetMethod(nameof(ReturnDefault), BindingFlags.Static | BindingFlags.NonPublic));
         int ok = 0, replaced = 0, unrunnable = 0, failed = 0;
-        foreach (var m in ReachableMethods(asm, wholeTypes))
+        var analysis = Analyze(asm, wholeTypes);
+        foreach (var m in analysis.Reachable)
         {
             try { _harmony.Patch(m, prefix: _skipPrefix); ok++; }
             catch (Exception first)
@@ -90,7 +91,7 @@ internal static class Retirer
                 }
             }
         }
-        return (ok, replaced, unrunnable, failed, sw.ElapsedMilliseconds);
+        return (ok, replaced, unrunnable, failed, analysis, sw.ElapsedMilliseconds);
     }
 
     /// <summary>
@@ -98,9 +99,23 @@ internal static class Retirer
     /// method of <paramref name="wholeTypes"/> is included: old injected Il2Cpp classes, whose Unity messages (Update,
     /// OnGUI, ...) the game calls directly until their instances are destroyed at the end of the frame.
     /// </summary>
-    internal static IEnumerable<MethodInfo> ReachableMethods(Assembly asm, IEnumerable<Type>? wholeTypes = null)
+    internal static IEnumerable<MethodInfo> ReachableMethods(Assembly asm, IEnumerable<Type>? wholeTypes = null) =>
+        Analyze(asm, wholeTypes).Reachable;
+
+    internal sealed class Analysis
     {
-        var result = new HashSet<MethodInfo>();
+        public readonly HashSet<MethodInfo> Reachable = new HashSet<MethodInfo>();
+        /// <summary>Methods handed to a hook constructor (MonoMod, NativeHook): left alone, see ForeignHooks.</summary>
+        public readonly HashSet<MethodInfo> HookHandlers = new HashSet<MethodInfo>();
+        /// <summary>Method bodies that construct a hook outside Harmony ("Type.Method").</summary>
+        public readonly List<string> HookSiteNames = new List<string>();
+        public int HookSites => HookSiteNames.Count;
+    }
+
+    internal static Analysis Analyze(Assembly asm, IEnumerable<Type>? wholeTypes = null)
+    {
+        var analysis = new Analysis();
+        var result = analysis.Reachable;
         const BindingFlags declared = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
         foreach (var t in wholeTypes ?? Array.Empty<Type>())
             foreach (var m in t.GetMethods(declared))
@@ -118,11 +133,14 @@ internal static class Retirer
             const BindingFlags all = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
             foreach (var method in type.GetMethods(all).Cast<MethodBase>().Concat(type.GetConstructors(all)))
             {
-                foreach (var target in DelegateTargets(method))
-                    if (target is MethodInfo mi && mi.DeclaringType?.Assembly == asm) Add(result, mi);
+                var (targets, createsHook) = ScanBody(method);
+                if (createsHook) analysis.HookSiteNames.Add(method.DeclaringType?.FullName + "." + method.Name);
+                foreach (var target in targets)
+                    if (target is MethodInfo mi && mi.DeclaringType?.Assembly == asm) Add(createsHook ? analysis.HookHandlers : result, mi);
             }
         }
-        return result;
+        result.ExceptWith(analysis.HookHandlers);
+        return analysis;
     }
 
     private static void Add(HashSet<MethodInfo> set, MethodInfo m)
@@ -140,12 +158,18 @@ internal static class Retirer
     }
 
     /// <summary>Walks the IL of <paramref name="method"/> and resolves the operand of every ldftn/ldvirtftn.</summary>
-    private static IEnumerable<MethodBase> DelegateTargets(MethodBase method)
+    /// <summary>
+    /// Walks the IL of <paramref name="method"/>: the operand of every ldftn/ldvirtftn (delegate targets), and whether
+    /// it constructs a hook outside Harmony (newobj of a MonoMod.RuntimeDetour type or MelonLoader's NativeHook).
+    /// </summary>
+    private static (List<MethodBase> targets, bool createsHook) ScanBody(MethodBase method)
     {
+        var targets = new List<MethodBase>();
+        bool createsHook = false;
         byte[]? il;
         try { il = method.GetMethodBody()?.GetILAsByteArray(); }
-        catch { yield break; }
-        if (il == null) yield break;
+        catch { return (targets, false); }
+        if (il == null) return (targets, false);
 
         Type[]? typeArgs = method.DeclaringType is { IsGenericType: true } dt ? dt.GetGenericArguments() : null;
         Type[]? methodArgs = method is MethodInfo { IsGenericMethod: true } gm ? gm.GetGenericArguments() : null;
@@ -155,17 +179,27 @@ internal static class Retirer
         {
             short value = il[i] == 0xFE && i + 1 < il.Length ? (short)(0xFE00 | il[i + 1]) : il[i];
             i += value > 0xFF || value < 0 ? 2 : 1;
-            if (!OpCodesByValue.TryGetValue(value, out var op)) yield break; // unknown opcode: stop rather than misread
+            if (!OpCodesByValue.TryGetValue(value, out var op)) break; // unknown opcode: stop rather than misread
 
             if ((op == OpCodes.Ldftn || op == OpCodes.Ldvirtftn) && i + 4 <= il.Length)
             {
                 MethodBase? target = null;
                 try { target = method.Module.ResolveMethod(BitConverter.ToInt32(il, i), typeArgs, methodArgs); }
                 catch { /* token into a generic context we cannot resolve */ }
-                if (target != null) yield return target;
+                if (target != null) targets.Add(target);
+            }
+            else if (op == OpCodes.Newobj && !createsHook && i + 4 <= il.Length)
+            {
+                try
+                {
+                    var ctor = method.Module.ResolveMethod(BitConverter.ToInt32(il, i), typeArgs, methodArgs);
+                    if (ctor?.DeclaringType is { } t && ForeignHooks.IsHookType(t)) createsHook = true;
+                }
+                catch { /* a type this game does not have */ }
             }
             i += OperandSize(op, il, i);
         }
+        return (targets, createsHook);
     }
 
     private static int OperandSize(OpCode op, byte[] il, int at) => op.OperandType switch

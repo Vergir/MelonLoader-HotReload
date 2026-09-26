@@ -194,7 +194,7 @@ internal sealed class Reloader
             var groupNames = new HashSet<string>(group.Select(i => i.Name), StringComparer.OrdinalIgnoreCase);
             foreach (var it in group) RemoveRemainingPatches(it.Name, it.OldAssemblies);
             foreach (var it in group) RemoveEventSubscriptions(it.Name, it.OldAssemblies);
-            foreach (var it in group) RetireOldBuild(it.Name, it.OldAssemblies, groupNames);
+            foreach (var it in group) RetireOldBuild(it.Name, it.OldAssemblies, it.OldMelons, groupNames);
             foreach (var it in group) PrefOwnership.ReleaseCategories(it.Name, it.OldAssemblies, it.OldMelons, _log);
 
             // ---- Bring up, libraries (referenced assemblies) first ----
@@ -353,7 +353,7 @@ internal sealed class Reloader
         }
         RemoveRemainingPatches(name, oldAssemblies);
         RemoveEventSubscriptions(name, oldAssemblies);
-        RetireOldBuild(name, oldAssemblies, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { name });
+        RetireOldBuild(name, oldAssemblies, oldMelons, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { name });
         PrefOwnership.ReleaseCategories(name, oldAssemblies, oldMelons, _log);
         _hash.Remove(name);
         _source.Remove(name);
@@ -362,9 +362,12 @@ internal sealed class Reloader
         return true;
     }
 
-    private void RetireOldBuild(string name, HashSet<Assembly> oldAssemblies, HashSet<string> group)
+    private void RetireOldBuild(string name, HashSet<Assembly> oldAssemblies, List<MelonBase> oldMelons, HashSet<string> group)
     {
         var parts = new List<string>();
+        // Hooks outside Harmony that the old build keeps in its fields: disposed, whatever the settings.
+        int hooksDisposed = ForeignHooks.DisposeHeld(name, oldAssemblies, oldMelons, _log);
+        if (hooksDisposed > 0) parts.Add("disposed " + hooksDisposed + " hook(s) made outside Harmony");
         // Classes whose instances the game drives directly: injected Il2Cpp classes, or MonoBehaviours on Mono.
         var injected = Compat.IsMono
             ? oldAssemblies.SelectMany(UnityApi.ComponentTypesIn).ToList()
@@ -373,6 +376,8 @@ internal sealed class Reloader
         {
             int destroyed = UnityApi.DestroyPersistentObjects(name, _log);
             if (destroyed > 0) parts.Add("destroyed " + destroyed + " object(s) kept across scenes");
+            int bundles = AssetBundles.UnloadOld(name, oldAssemblies, oldMelons, _log);
+            if (bundles > 0) parts.Add("unloaded " + bundles + " AssetBundle(s)");
             if (injected.Count > 0)
             {
                 int instances = UnityApi.DestroyInstancesOf(injected, _log);
@@ -388,11 +393,19 @@ internal sealed class Reloader
             else
                 foreach (var asm in oldAssemblies)
                 {
-                    var (retired, replaced, unrunnable, failed, ms) = Retirer.Retire(asm, injected.Where(t => t.Assembly == asm), _log);
+                    var (retired, replaced, unrunnable, failed, analysis, ms) = Retirer.Retire(asm, injected.Where(t => t.Assembly == asm), _log);
+                    int hookHandlers = analysis.HookHandlers.Count;
                     if (retired + unrunnable + failed > 0)
                         parts.Add("retired " + retired + " old method(s)" + (replaced > 0 ? " (" + replaced + " by replacing the body)" : "")
                                   + (unrunnable > 0 ? " (" + unrunnable + " skipped: cannot run in this game)" : "")
                                   + (failed > 0 ? " (" + failed + " failed)" : "") + " in " + ms + " ms");
+                    if (hookHandlers > 0) parts.Add("left " + hookHandlers + " hook handler(s) running");
+                    // Not a warning: such a hook keeps running the old build's handler, which still works. Named so the
+                    // author can keep it in a field or dispose it in OnDeinitializeMelon.
+                    if (analysis.HookSites > 0 && hooksDisposed == 0)
+                        _log.Msg(name + ": hooks made outside Harmony in " + string.Join(", ", analysis.HookSiteNames.Take(3)) +
+                                 (analysis.HookSites > 3 ? " (+" + (analysis.HookSites - 3) + " more)" : "") +
+                                 " are not kept in a field, so they stay and keep calling the old build.");
                 }
         }
         // IL2CPP: the new build registers classes with the same names; Il2CppInterop would refuse them otherwise.

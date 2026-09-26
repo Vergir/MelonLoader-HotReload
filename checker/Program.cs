@@ -99,6 +99,7 @@ internal sealed class ModScan
     public HashSet<string> AttributeTypes = new(StringComparer.Ordinal);
     public List<TypeDef> TypeDefs = new();
     public HashSet<string> DefinedMethods = new(StringComparer.Ordinal); // method names defined anywhere in the assembly
+    public HashSet<string> FieldTypes = new(StringComparer.Ordinal);     // every type named in a field signature (incl. generic arguments)
     public bool LooksObfuscated;
 
     public static ModScan? Read(string path)
@@ -145,6 +146,11 @@ internal sealed class ModScan
             typeBases[name] = baseName;
             if (md.GetString(td.Name).Any(c => c > 0x7e || char.IsControl(c))) weird++;
             foreach (var mh in td.GetMethods()) s.DefinedMethods.Add(md.GetString(md.GetMethodDefinition(mh).Name));
+            var names = new NameCollector(md, s.FieldTypes);
+            foreach (var fh in td.GetFields())
+            {
+                try { md.GetFieldDefinition(fh).DecodeSignature(names, null); } catch { /* unusual signature */ }
+            }
         }
         s.LooksObfuscated = s.TypeDefs.Count > 5 && weird * 3 > s.TypeDefs.Count;
 
@@ -282,6 +288,29 @@ internal sealed class SigTypeProvider : ISignatureTypeProvider<(string type, str
         r.GetTypeSpecification(h).DecodeSignature(this, c);
 }
 
+/// <summary>Collects every type named in a signature, generic arguments included (List&lt;Hook&gt; yields List`1 and Hook).</summary>
+internal sealed class NameCollector : ISignatureTypeProvider<string, object?>
+{
+    private readonly MetadataReader _md;
+    private readonly HashSet<string> _names;
+    public NameCollector(MetadataReader md, HashSet<string> names) { _md = md; _names = names; }
+    private string Add(string n) { _names.Add(n); return n; }
+    public string GetArrayType(string e, ArrayShape shape) => e;
+    public string GetByReferenceType(string e) => e;
+    public string GetFunctionPointerType(MethodSignature<string> s) => "fnptr";
+    public string GetGenericInstantiation(string g, ImmutableArray<string> a) => g;
+    public string GetGenericMethodParameter(object? c, int i) => "!!" + i;
+    public string GetGenericTypeParameter(object? c, int i) => "!" + i;
+    public string GetModifiedType(string m, string u, bool r) => u;
+    public string GetPinnedType(string e) => e;
+    public string GetPointerType(string e) => e;
+    public string GetPrimitiveType(PrimitiveTypeCode c) => c.ToString();
+    public string GetSZArrayType(string e) => e;
+    public string GetTypeFromDefinition(MetadataReader r, TypeDefinitionHandle h, byte k) => Add(Names.Of(r, h));
+    public string GetTypeFromReference(MetadataReader r, TypeReferenceHandle h, byte k) => Add(Names.Of(r, h).type);
+    public string GetTypeFromSpecification(MetadataReader r, object? c, TypeSpecificationHandle h, byte k) => r.GetTypeSpecification(h).DecodeSignature(this, c);
+}
+
 internal sealed class AttrTypeProvider : ICustomAttributeTypeProvider<string>
 {
     public string GetPrimitiveType(PrimitiveTypeCode typeCode) => typeCode.ToString();
@@ -338,15 +367,29 @@ internal static class Rules
             injected);
 
         // ---- Needs cleanup in OnDeinitializeMelon --------------------------------------------------------------
-        Add("assetbundles", Severity.Cleanup, "Loads AssetBundles",
-            "Loading the same bundle again fails while the old one is loaded. Call bundle.Unload(true/false) in OnDeinitializeMelon.",
-            Refs(m => m.Type == "UnityEngine.AssetBundle" && m.Member.StartsWith("LoadFrom")));
-        Add("nativehooks", Severity.Cleanup, "Native / MonoMod hooks outside Harmony",
-            "HotReload removes only Harmony patches, and it retires the old build's delegate targets, so a hooked function would " +
-            "return defaults instead of running. Dispose these hooks in OnDeinitializeMelon (or set RetireOldBuild = false).",
-            Refs(m => (m.Type.StartsWith("MonoMod.RuntimeDetour.") && m.Member == ".ctor") ||
-                      (m.Type == "MelonLoader.MelonUtils" && m.Member.StartsWith("NativeHook")) ||
-                      (m.Type.StartsWith("MelonLoader.NativeUtils.NativeHook") && m.Member is ".ctor" or "Attach")));
+        // AssetBundles: HotReload unloads the ones the old build keeps in fields, and (best effort) the ones loaded through
+        // the hooked AssetBundle.LoadFrom* methods. In IL2CPP games stripped load methods cannot be hooked.
+        bool keepsBundle = s.FieldTypes.Any(t => t.EndsWith("AssetBundle", StringComparison.Ordinal) || t.EndsWith("AssetBundleCreateRequest", StringComparison.Ordinal));
+        var bundleLoads = Refs(m => m.Type.EndsWith("AssetBundle") && m.Member.StartsWith("LoadFrom")).ToList();
+        if (keepsBundle || s.Flavor == Flavor.Mono)
+            Add("assetbundles", Severity.Info, "Loads AssetBundles",
+                "Handled: HotReload unloads (Unload(false)) the bundles the old build keeps in fields and the ones it loaded through AssetBundle.LoadFrom*.",
+                bundleLoads);
+        else
+            Add("assetbundles", Severity.Cleanup, "Loads AssetBundles without keeping them in a field",
+                "HotReload unloads bundles found in the old build's fields, and tracks AssetBundle.LoadFrom* where the game has " +
+                "that method (IL2CPP games strip some). Keep the bundle in a field, or Unload it in OnDeinitializeMelon.",
+                bundleLoads);
+        // Hooks outside Harmony: HotReload disposes the ones kept in fields; the others stay and keep calling old code.
+        bool keepsHook = s.FieldTypes.Any(t => t.StartsWith("MonoMod.RuntimeDetour.", StringComparison.Ordinal) || t.StartsWith("MelonLoader.NativeUtils.NativeHook", StringComparison.Ordinal));
+        var hookRefs = Refs(m => (m.Type.StartsWith("MonoMod.RuntimeDetour.") && m.Member == ".ctor") ||
+                                 (m.Type == "MelonLoader.MelonUtils" && m.Member.StartsWith("NativeHook")) ||
+                                 (m.Type.StartsWith("MelonLoader.NativeUtils.NativeHook") && m.Member is ".ctor" or "Attach")).ToList();
+        Add("nativehooks", keepsHook ? Severity.Info : Severity.Cleanup, "Native / MonoMod hooks outside Harmony",
+            keepsHook
+                ? "Handled: HotReload disposes the hooks the old build keeps in fields. A hook not kept in a field keeps calling the old build; dispose those in OnDeinitializeMelon."
+                : "The hooks are not kept in a field, so HotReload cannot find them: they keep calling the old build after a reload. Keep them in a field (HotReload disposes it) or dispose them in OnDeinitializeMelon.",
+            hookRefs);
         Add("threads", Severity.Cleanup, "Starts its own threads",
             "A loop already running on a thread keeps running after a reload; retiring only stops later calls. Signal it to stop in OnDeinitializeMelon.",
             Refs(m => m.Type == "System.Threading.Thread" && m.Member == ".ctor"));

@@ -20,14 +20,20 @@ Each feature degrades on its own: if a MelonLoader internal is missing, that fea
 2. Start the game, then build a mod and copy its DLL (and `.pdb`) into `Mods/`. A plain copy works while the game runs.
    HotReload sees the change and reloads it:
    `[HotReload] Reloaded X 1.0.0 -> 1.0.1 (Harmony: 6 method(s) unpatched, 6 patched; replayed 4 scene(s)) in 110 ms`.
-3. **F8** reloads every mod whose DLL changed, for when auto reload is off or a file event was missed.
+3. **F8** reloads every mod whose DLL changed, for when auto reload is off or a file event was missed. It only checks
+   for changed DLLs; nothing changed means nothing is reloaded. On a Steam Deck, bind a back grip (L4/R4) to F8 in the
+   game's Steam Input layout: the grips are invisible to games unless bound, so no game action collides with it.
 
 Watched and reloaded: mods in `Mods/` and its manifest subfolders, other plugins in `Plugins/`, and libraries in `UserLibs/`.
 Deleting a mod or plugin DLL unloads it, and a new mod DLL dropped in is loaded. Mods that reference a reloaded assembly
 reload with it, and so do the stateful libraries a reloaded mod uses (see below).
 
 `Mods/` DLLs are never locked, so a plain copy works. `Plugins/` and `UserLibs/` are loaded before HotReload, so their DLLs are
-locked while the game runs: deploy those with the rename-then-copy step below.
+locked while the game runs and a build cannot overwrite them. For those, add the project's build folder to
+`ExtraWatchPaths` (e.g. `["C:/src/MyPlugin/bin/Release"]`): HotReload then reloads the plugin or library straight from
+there, together with everything that depends on it. The copy in `Plugins/` or `UserLibs/` is what the next game start
+loads, so deploy there when the game is closed (or move the locked DLL aside first: Windows allows renaming a loaded DLL,
+and HotReload deletes `*.hotreload-old` files at the next start).
 
 ## Config: `<game>/UserData/HotReload.toml`
 
@@ -36,7 +42,7 @@ Created on first launch. Edits apply immediately, except `ShadowCopyMods`.
 | Key | Default | Meaning |
 |---|---|---|
 | `AutoReload` | `true` | Reload as soon as a DLL changes. `false` = only the reload key. |
-| `ReloadKey` | `"F8"` | Any [`UnityEngine.KeyCode`](https://docs.unity3d.com/ScriptReference/KeyCode.html) name; `"None"` disables it. |
+| `ReloadKey` | `"F8"` | Any [`UnityEngine.KeyCode`](https://docs.unity3d.com/ScriptReference/KeyCode.html) name, or a chord such as `"LeftControl+F8"` (fires when the last key goes down while the others are held); `"None"` disables it. Gamepad buttons (`JoystickButton0`...) work through legacy input only; avoid a button the game uses on its own. |
 | `ExtraWatchPaths` | `[]` | More folders (every `*.dll`) or DLL files to watch, e.g. a project's `bin/Release`. Relative to the game folder. |
 | `Ignore` | `[]` | Assembly names never reloaded. |
 | `DebounceMs` | `500` | Quiet time after the last file event before reloading. |
@@ -128,18 +134,35 @@ is the known case: it registers its UI and log callback with UniverseLib; with U
 comes back fully initialized after a hot reload. A library in `Mods/` (loaded on demand, not a MelonLoader library) is not
 reloaded.
 
+**AssetBundles** are unloaded with the old build (`Unload(false)`: objects already created from them stay intact), so the
+new build can load them again. HotReload finds the bundles the old build keeps in its fields (also a mod's own wrapper
+type named `...AssetBundle` with an `Unload(bool)` method, as UniverseLib has), and the ones it loaded through
+`AssetBundle.LoadFrom*`, which it tracks. Tracking is best effort in IL2CPP games, where some of those methods are
+stripped from the game; keep bundles in a field to be safe.
+
+**Hooks made outside Harmony** (MonoMod `Hook` / `Detour` / `ILHook` / `NativeDetour`, MelonLoader's `NativeHook<T>`)
+are disposed with the old build when it keeps them in a field. Methods handed to a hook constructor are not retired, so a
+hook HotReload cannot find keeps running the old build's (working) handler instead of breaking the hooked function;
+HotReload warns when it found hook code but no hook in a field.
+
 What HotReload cannot undo, so the mod must in `OnDeinitializeMelon`:
 
-* **AssetBundles**: loading the same bundle twice fails, so `Unload` it.
-* **Hooks made outside Harmony** (MonoMod `Hook`/`Detour`, native hooks): dispose them. With retiring on, a hook left in
-  place would call a retired handler and the hooked function would return defaults.
+* **Hooks made outside Harmony that are not kept in a field**: dispose them.
 * **Loops on threads the mod started itself**: a call that is already running finishes; signal it to stop.
 * **Game state the mod changed**, such as static fields: re-apply it in `OnInitializeMelon`, because the new build starts
   with fresh static state.
 
+And in `OnInitializeMelon`:
+
+* **UI the old build added to a screen that stays open** (settings rows, buttons): the old rows call retired code and do
+  nothing until the game rebuilds that screen. Rebuild or refresh your UI when the screen is already open, and guard
+  against adding a row twice.
+
 Other limits: old assemblies stay in memory, about the DLL's size per reload. HotReload cannot reload itself. On Mono,
-each reloaded build carries a changed assembly name (`Name__hrN`, see below); code that compares its own assembly name
-to a constant sees the suffix.
+each reloaded build carries a changed assembly name (`Name__hrN`, see below); code that compares its own assembly name to
+a constant sees the suffix. HotReload does not hide it: the old builds stay loaded, so two assemblies would share one name
+and a lookup by name would find the old build first. Resource names, Harmony IDs from `GetName().Name` and MelonLoader's
+own names are unaffected in practice.
 
 ## Checking existing mods: `checker/`
 

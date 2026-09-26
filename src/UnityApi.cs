@@ -98,6 +98,7 @@ internal static class UnityApi
     {
         public readonly Type ObjectBase;
         public readonly PropertyInfo WasCollected;
+        public readonly PropertyInfo? Pointer;
         public readonly MethodInfo TryCast, TypeFrom;
         private readonly Dictionary<Type, MethodInfo> _casts = new Dictionary<Type, MethodInfo>();
 
@@ -105,6 +106,7 @@ internal static class UnityApi
         {
             ObjectBase = objectBase;
             WasCollected = objectBase.GetProperty("WasCollected", PublicInstance) ?? throw new MissingMemberException(objectBase.FullName, "WasCollected");
+            Pointer = objectBase.GetProperty("Pointer", PublicInstance);
             TryCast = objectBase.GetMethod("TryCast", PublicInstance, null, Type.EmptyTypes, null) ?? throw new MissingMethodException(objectBase.FullName, "TryCast");
             TypeFrom = il2CppType.GetMethod("From", PublicStatic, null, new[] { typeof(Type) }, null) ?? throw new MissingMethodException(il2CppType.FullName, "From");
         }
@@ -149,6 +151,29 @@ internal static class UnityApi
         catch { return false; }
     }
 
+    /// <summary>
+    /// For objects that may or may not be Unity objects (a mod's own wrapper around a native object): alive when it is a
+    /// live Unity object, or not a Unity object and not a collected Il2Cpp object.
+    /// </summary>
+    public static bool IsAliveOrNotUnity(object obj)
+    {
+        try
+        {
+            if (U.Object.IsInstanceOfType(obj)) return IsAlive(obj);
+            var il2cpp = Il2Cpp;
+            return il2cpp == null || !il2cpp.ObjectBase.IsInstanceOfType(obj) || !(bool)il2cpp.WasCollected.GetValue(obj, null)!;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>The native object behind an Il2Cpp wrapper (IntPtr.Zero on Mono or for managed objects).</summary>
+    public static IntPtr NativePointer(object obj)
+    {
+        var il2cpp = Il2Cpp;
+        if (il2cpp?.Pointer == null || !il2cpp.ObjectBase.IsInstanceOfType(obj)) return IntPtr.Zero;
+        try { return (IntPtr)il2cpp.Pointer.GetValue(obj, null)!; } catch { return IntPtr.Zero; }
+    }
+
     private static object? As(object obj, Type type)
     {
         var il2cpp = Il2Cpp;
@@ -158,9 +183,8 @@ internal static class UnityApi
     // ---- Reload key (legacy UnityEngine.Input) --------------------------------------------------------------------
 
     private static Type? _keyCode;
-    private static MethodInfo? _getKeyDown;
-    private static int _argsKey = -1;
-    private static object[] _args = Array.Empty<object>();
+    private static MethodInfo? _getKeyDown, _getKey;
+    private static readonly Dictionary<int, object[]> KeyArgs = new Dictionary<int, object[]>();
 
     private static Type KeyCodeType => _keyCode ??= Need("UnityEngine.KeyCode", InputModules);
 
@@ -172,9 +196,24 @@ internal static class UnityApi
             var input = FindType("UnityEngine.Input", InputModules);
             if (input == null) return "the game has no UnityEngine.Input";
             _getKeyDown = input.GetMethod("GetKeyDown", PublicStatic, null, new[] { KeyCodeType }, null);
-            return _getKeyDown == null ? "Input.GetKeyDown(KeyCode) not found" : null;
+            _getKey = input.GetMethod("GetKey", PublicStatic, null, new[] { KeyCodeType }, null);
+            return _getKeyDown == null || _getKey == null ? "Input.GetKeyDown / GetKey(KeyCode) not found" : null;
         }
         catch (Exception e) { return e.GetBaseException().Message; }
+    }
+
+    private static object[] Args(int key)
+    {
+        if (!KeyArgs.TryGetValue(key, out var args)) KeyArgs[key] = args = new[] { Enum.ToObject(KeyCodeType, key) };
+        return args;
+    }
+
+    private static bool CallInput(MethodInfo? method, int key)
+    {
+        if (key == NoKey) return false;
+        if ((_getKeyDown == null || _getKey == null) && LegacyInputProblem() is { } problem) throw new InvalidOperationException(problem);
+        try { return (bool)method!.Invoke(null, Args(key))!; }
+        catch (TargetInvocationException e) when (e.InnerException != null) { throw e.InnerException; }
     }
 
     /// <summary>Parses a KeyCode name. Returns false for unknown names.</summary>
@@ -192,15 +231,11 @@ internal static class UnityApi
 
     public static string KeyName(int key) => Enum.ToObject(KeyCodeType, key).ToString() ?? key.ToString();
 
-    /// <summary>Throws when the game disabled legacy input; KeyInput then moves on to the next backend.</summary>
-    public static bool KeyDown(int key)
-    {
-        if (key == NoKey) return false;
-        if (_getKeyDown == null && LegacyInputProblem() is { } problem) throw new InvalidOperationException(problem);
-        if (key != _argsKey) { _args = new[] { Enum.ToObject(KeyCodeType, key) }; _argsKey = key; }
-        try { return (bool)_getKeyDown!.Invoke(null, _args)!; }
-        catch (TargetInvocationException e) when (e.InnerException != null) { throw e.InnerException; }
-    }
+    /// <summary>True in the frame the key went down. Throws when the game disabled legacy input; KeyInput then moves on to the next backend.</summary>
+    public static bool KeyDown(int key) => CallInput(_getKeyDown, key);
+
+    /// <summary>True while the key is held.</summary>
+    public static bool KeyHeld(int key) => CallInput(_getKey, key);
 
     // ---- Scenes ------------------------------------------------------------------------------------------------
 

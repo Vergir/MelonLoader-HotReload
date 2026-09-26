@@ -7,6 +7,8 @@ using Il2CppInterop.Runtime.Injection;
 #endif
 using HRTestBase;
 using MelonLoader;
+using MelonLoader.Utils;
+using MonoMod.RuntimeDetour;
 using UnityEngine;
 using UnityEngine.UI;
 
@@ -73,6 +75,53 @@ public class HRTestBaseMod : MelonMod
         MelonCoroutines.Start(Ticker());
         var build = Greeting();
         _timer = new System.Threading.Timer(_ => MelonLogger.Msg("[HRTestBase] timer from " + build), null, 3000, 3000);
+        LoadBundles();
+        InstallHooks();
+    }
+
+    // AssetBundles (step 4): the test deploy extracts two bundles into UserData. One is kept in a field, one is loaded
+    // and dropped; a reload must unload both, or loading them again fails.
+    private static UnityEngine.AssetBundle? _keptBundle;
+
+    private void LoadBundles()
+    {
+        try
+        {
+            var kept = System.IO.Path.Combine(MelonEnvironment.UserDataDirectory, "HRTestBundleKept.bundle");
+            if (System.IO.File.Exists(kept))
+            {
+                _keptBundle = LoadBundle(kept);
+                LoggerInstance.Msg("kept bundle loaded: " + (_keptBundle != null));
+            }
+            var dropped = System.IO.Path.Combine(MelonEnvironment.UserDataDirectory, "HRTestBundleDropped.bundle");
+            if (System.IO.File.Exists(dropped))
+                LoggerInstance.Msg("dropped bundle loaded: " + (LoadBundle(dropped) != null));
+        }
+        catch (System.Exception e) { LoggerInstance.Error("loading the test bundles failed: " + e.Message); }
+    }
+
+    // IL2CPP games can strip AssetBundle.LoadFromFile (No Rest for the Wicked does; Addressables keeps the async loader).
+    private static UnityEngine.AssetBundle? LoadBundle(string path)
+    {
+        try { return UnityEngine.AssetBundle.LoadFromFile(path); }
+        catch (System.NotSupportedException) { return UnityEngine.AssetBundle.LoadFromFileAsync(path).assetBundle; }
+    }
+
+    // Hooks outside Harmony (step 4): two MonoMod hooks on HRTestPlugin.Probe, one kept in a field (HotReload disposes
+    // it), one dropped (it stays, and its handler keeps working instead of being retired).
+    // MelonLoader's MonoMod wants static handlers; they are still handed over as delegates (ldftn), which is what
+    // HotReload's retiring would otherwise turn into no-ops.
+    private static Hook? _keptHook;
+    private static readonly string HookBuild = typeof(HRTestBaseMod).Assembly.GetName().Version?.ToString(3) ?? "?";
+
+    private static string KeptProbe(System.Func<string> orig) => orig() + " +kept(" + HookBuild + ")";
+    private static string DroppedProbe(System.Func<string> orig) => orig() + " +dropped(" + HookBuild + ")";
+
+    private static void InstallHooks()
+    {
+        var probe = typeof(HRTestPlugin.HRTestPluginMelon).GetMethod(nameof(HRTestPlugin.HRTestPluginMelon.Probe))!;
+        _keptHook = new Hook(probe, new System.Func<System.Func<string>, string>(KeptProbe));
+        new Hook(probe, new System.Func<System.Func<string>, string>(DroppedProbe));
     }
 
     private static MelonPreferences_Entry<int> _reloads = null!;

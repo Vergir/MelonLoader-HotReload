@@ -19,7 +19,7 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" PrivateAssets="all" />
-    <!-- What HotReload.dll binds to; MelonLoader itself is only referenced for compiling, never run. -->
+    <!-- What HotReload.dll binds to. MelonLoader.dll is copied for its types (MelonBase in signatures); none of its code runs. -->
     <PackageReference Include="Mono.Cecil" Version="0.11.6" />
     <PackageReference Include="HarmonyX" Version="2.10.2" />
     <PackageDownload Include="LavaGang.MelonLoader" Version="[0.7.3]" />
@@ -29,7 +29,7 @@
     <!-- Build HotReload first (net472, so no assembly reference through the project), then reference its output. -->
     <ProjectReference Include="..\..\HotReload.csproj" ReferenceOutputAssembly="false" SkipGetTargetFrameworkProperties="true" Properties="DeployToGame=false" />
     <Reference Include="HotReload"><HintPath>$(HotReloadDir)HotReload.dll</HintPath></Reference>
-    <Reference Include="MelonLoader"><HintPath>$(NuGetPackageRoot)lavagang.melonloader\0.7.3\lib\net35\MelonLoader.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="MelonLoader"><HintPath>$(NuGetPackageRoot)lavagang.melonloader\0.7.3\lib\net35\MelonLoader.dll</HintPath><Private>true</Private></Reference>
     <ProjectReference Include="..\..\checker\HotReloadCheck.csproj" />
   </ItemGroup>
 </Project>

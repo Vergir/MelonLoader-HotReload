@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -9,11 +8,14 @@ using MelonLoader;
 namespace HotReload;
 
 /// <summary>
-/// The reload key, read through whichever input API the game allows. Configured with a UnityEngine.KeyCode name.
+/// The reload key, read through whichever input API the game allows. Configured with UnityEngine.KeyCode names; a chord
+/// is written "LeftControl+F8" or "JoystickButton4+JoystickButton5" and fires when its last key goes down while the
+/// others are held, so a key the game uses on its own does not trigger it.
 ///  1. Legacy UnityEngine.Input: throws when the game switched "Active Input Handling" to the Input System package.
-///  2. Input System (UnityEngine.InputSystem.Keyboard.current[Key].wasPressedThisFrame), by reflection, so HotReload
-///     has no compile-time dependency on a package most games do not ship.
-///  3. Windows GetAsyncKeyState while the game window has focus (also works under Wine/Proton).
+///     The only backend that reads gamepad buttons (JoystickButtonN).
+///  2. Input System (UnityEngine.InputSystem.Keyboard.current[Key]), by reflection, so HotReload has no compile-time
+///     dependency on a package most games do not ship. Keyboard keys only.
+///  3. Windows GetAsyncKeyState while the game window has focus (also works under Wine/Proton). Keyboard keys only.
 /// "Auto" tries them in that order and remembers the first that works.
 /// </summary>
 internal sealed class KeyInput
@@ -22,13 +24,14 @@ internal sealed class KeyInput
 
     private readonly MelonLogger.Instance _log;
     private string _keyName = "F8";
+    private string[] _keys = { "F8" };
     private Backend _backend = Backend.None;
     private Backend[] _candidates = Array.Empty<Backend>();
-    private int _legacyKey;
-    private object? _inputSystemKey;
-    private PropertyInfo? _keyboardCurrent, _keyboardItem, _wasPressed;
-    private int _vk;
-    private bool _vkWasDown;
+    private int[] _legacyKeys = Array.Empty<int>();
+    private object?[] _inputSystemKeys = Array.Empty<object?>();
+    private PropertyInfo? _keyboardCurrent, _keyboardItem, _wasPressed, _isPressed;
+    private int[] _vks = Array.Empty<int>();
+    private bool[] _vkWasDown = Array.Empty<bool>();
     private IntPtr _window;
 
     public KeyInput(MelonLogger.Instance log) => _log = log;
@@ -43,13 +46,21 @@ internal sealed class KeyInput
 
     public string KeyName => _keyName;
 
-    /// <param name="keyName">UnityEngine.KeyCode name, or "None".</param>
+    /// <summary>The key names of a chord ("LeftControl + F8" -> LeftControl, F8). Empty for "None" or blank.</summary>
+    internal static string[] ParseChord(string? keyName)
+    {
+        if (string.IsNullOrWhiteSpace(keyName) || keyName!.Trim().Equals("None", StringComparison.OrdinalIgnoreCase)) return Array.Empty<string>();
+        return keyName.Split('+').Select(k => k.Trim()).Where(k => k.Length > 0).ToArray();
+    }
+
+    /// <param name="keyName">UnityEngine.KeyCode name or chord ("LeftControl+F8"), or "None".</param>
     /// <param name="backend">"Auto", "Legacy", "InputSystem" or "Windows".</param>
     public void Configure(string keyName, string backend)
     {
-        _keyName = string.IsNullOrWhiteSpace(keyName) ? "None" : keyName.Trim();
+        _keys = ParseChord(keyName);
+        _keyName = _keys.Length == 0 ? "None" : string.Join("+", _keys);
         _backend = Backend.None;
-        if (_keyName.Equals("None", StringComparison.OrdinalIgnoreCase)) { _candidates = Array.Empty<Backend>(); return; }
+        if (_keys.Length == 0) { _candidates = Array.Empty<Backend>(); return; }
 
         _candidates = (backend ?? "Auto").Trim().ToLowerInvariant() switch
         {
@@ -61,7 +72,7 @@ internal sealed class KeyInput
         NextBackend(null);
     }
 
-    /// <summary>True in the frame the key goes down. Never throws.</summary>
+    /// <summary>True in the frame the key (or the last key of the chord) goes down. Never throws.</summary>
     public bool Pressed()
     {
         if (_backend == Backend.None) return false;
@@ -69,9 +80,9 @@ internal sealed class KeyInput
         {
             return _backend switch
             {
-                Backend.Legacy => LegacyDown(_legacyKey),
-                Backend.InputSystem => InputSystemDown(),
-                Backend.Windows => WindowsDown(),
+                Backend.Legacy => LegacyPressed(),
+                Backend.InputSystem => InputSystemPressed(),
+                Backend.Windows => WindowsPressed(),
                 _ => false,
             };
         }
@@ -83,7 +94,19 @@ internal sealed class KeyInput
         }
     }
 
-    /// <summary>Picks the next candidate after the current one that can resolve the key.</summary>
+    /// <summary>A chord fires when all its keys are held and at least one of them went down this frame.</summary>
+    internal static bool ChordPressed(int count, Func<int, bool> held, Func<int, bool> wentDown)
+    {
+        bool any = false;
+        for (int i = 0; i < count; i++)
+        {
+            if (!held(i)) return false;
+            any |= wentDown(i);
+        }
+        return any;
+    }
+
+    /// <summary>Picks the next candidate after the current one that can resolve every key.</summary>
     private void NextBackend(string? failure)
     {
         var failed = _backend;
@@ -116,13 +139,17 @@ internal sealed class KeyInput
     {
         try
         {
-            if (!UnityApi.TryParseKey(_keyName, out _legacyKey)) return "'" + _keyName + "' is not a KeyCode name";
+            var keys = new int[_keys.Length];
+            for (int i = 0; i < _keys.Length; i++)
+                if (!UnityApi.TryParseKey(_keys[i], out keys[i])) return "'" + _keys[i] + "' is not a KeyCode name";
+            _legacyKeys = keys;
             return UnityApi.LegacyInputProblem();
         }
         catch (Exception e) { return e.GetBaseException().Message; }
     }
 
-    private static bool LegacyDown(int key) => UnityApi.KeyDown(key);
+    private bool LegacyPressed() =>
+        ChordPressed(_legacyKeys.Length, i => UnityApi.KeyHeld(_legacyKeys[i]), i => UnityApi.KeyDown(_legacyKeys[i]));
 
     // ---- Input System package, by reflection ----------------------------------------------------------------------
 
@@ -137,18 +164,21 @@ internal sealed class KeyInput
 
     private string? TrySetupInputSystem()
     {
-        Type? keyboard = FindType("UnityEngine.InputSystem.Keyboard", "Unity.InputSystem");
+        Type? keyboard = UnityApi.FindType("UnityEngine.InputSystem.Keyboard", "Unity.InputSystem");
         if (keyboard == null) return "the game has no Input System package";
         var keyType = keyboard.Assembly.GetType("UnityEngine.InputSystem.Key");
         if (keyType == null) return "UnityEngine.InputSystem.Key not found";
 
-        var name = InputSystemKeyName(_keyName);
-        try { _inputSystemKey = Enum.Parse(keyType, name, ignoreCase: true); }
-        catch { return "no Input System key for '" + _keyName + "'"; }
-
+        var keys = new object?[_keys.Length];
+        for (int i = 0; i < _keys.Length; i++)
+        {
+            try { keys[i] = Enum.Parse(keyType, InputSystemKeyName(_keys[i]), ignoreCase: true); }
+            catch { return "no Input System key for '" + _keys[i] + "' (gamepad buttons need legacy input)"; }
+        }
+        _inputSystemKeys = keys;
         _keyboardCurrent = keyboard.GetProperty("current", BindingFlags.Public | BindingFlags.Static);
         _keyboardItem = keyboard.GetProperty("Item", new[] { keyType });
-        _wasPressed = null;
+        _wasPressed = _isPressed = null;
         return _keyboardCurrent == null || _keyboardItem == null ? "Keyboard.current / Keyboard[Key] not found" : null;
     }
 
@@ -161,17 +191,18 @@ internal sealed class KeyInput
         return KeyCodeToInputSystem.TryGetValue(name, out var mapped) ? mapped : name;
     }
 
-    private bool InputSystemDown()
+    private bool InputSystemPressed()
     {
         var kb = _keyboardCurrent!.GetValue(null);
         if (kb == null) return false; // no keyboard connected
-        var control = _keyboardItem!.GetValue(kb, new[] { _inputSystemKey });
-        if (control == null) return false;
-        _wasPressed ??= control.GetType().GetProperty("wasPressedThisFrame");
-        return _wasPressed != null && _wasPressed.GetValue(control) is true;
+        var controls = new object?[_inputSystemKeys.Length];
+        for (int i = 0; i < controls.Length; i++) controls[i] = _keyboardItem!.GetValue(kb, new[] { _inputSystemKeys[i] });
+        if (controls.Any(c => c == null)) return false;
+        _wasPressed ??= controls[0]!.GetType().GetProperty("wasPressedThisFrame");
+        _isPressed ??= controls[0]!.GetType().GetProperty("isPressed");
+        if (_wasPressed == null || _isPressed == null) return false;
+        return ChordPressed(controls.Length, i => _isPressed.GetValue(controls[i]) is true, i => _wasPressed.GetValue(controls[i]) is true);
     }
-
-    private static Type? FindType(string fullName, string assemblyName) => UnityApi.FindType(fullName, assemblyName);
 
     // ---- Windows key state ----------------------------------------------------------------------------------------
 
@@ -185,6 +216,7 @@ internal sealed class KeyInput
         ["PageUp"] = 0x21, ["PageDown"] = 0x22, ["End"] = 0x23, ["Home"] = 0x24, ["LeftArrow"] = 0x25, ["UpArrow"] = 0x26,
         ["RightArrow"] = 0x27, ["DownArrow"] = 0x28, ["Insert"] = 0x2D, ["Delete"] = 0x2E, ["KeypadMultiply"] = 0x6A,
         ["KeypadPlus"] = 0x6B, ["KeypadMinus"] = 0x6D, ["KeypadPeriod"] = 0x6E, ["KeypadDivide"] = 0x6F, ["ScrollLock"] = 0x91,
+        ["LeftShift"] = 0xA0, ["RightShift"] = 0xA1, ["LeftControl"] = 0xA2, ["RightControl"] = 0xA3, ["LeftAlt"] = 0xA4, ["RightAlt"] = 0xA5,
         ["Semicolon"] = 0xBA, ["Equals"] = 0xBB, ["Comma"] = 0xBC, ["Minus"] = 0xBD, ["Period"] = 0xBE, ["Slash"] = 0xBF,
         ["BackQuote"] = 0xC0, ["LeftBracket"] = 0xDB, ["Backslash"] = 0xDC, ["RightBracket"] = 0xDD, ["Quote"] = 0xDE,
     };
@@ -192,9 +224,14 @@ internal sealed class KeyInput
     private string? TrySetupWindows()
     {
         if (!Compat.IsWindows) return "not on Windows";
-        if (VirtualKey(_keyName) is not { } vk) return "no virtual-key code for '" + _keyName + "'";
-        _vk = vk;
-        _vkWasDown = true; // ignore a key already held when switching
+        var vks = new int[_keys.Length];
+        for (int i = 0; i < _keys.Length; i++)
+        {
+            if (VirtualKey(_keys[i]) is not { } vk) return "no virtual-key code for '" + _keys[i] + "' (gamepad buttons need legacy input)";
+            vks[i] = vk;
+        }
+        _vks = vks;
+        _vkWasDown = Enumerable.Repeat(true, vks.Length).ToArray(); // ignore keys already held when switching
         return null;
     }
 
@@ -210,12 +247,23 @@ internal sealed class KeyInput
         return null;
     }
 
-    private bool WindowsDown()
+    /// <summary>
+    /// Polled once per frame. Bit 0x8000 is "down now"; bit 1 is "pressed since the last query", which catches a tap that
+    /// went down and up between two frames (seen at low frame rates).
+    /// </summary>
+    private bool WindowsPressed()
     {
-        bool down = (GetAsyncKeyState(_vk) & 0x8000) != 0;
-        bool pressed = down && !_vkWasDown;
+        var down = new bool[_vks.Length];
+        var tapped = new bool[_vks.Length];
+        for (int i = 0; i < _vks.Length; i++)
+        {
+            short state = GetAsyncKeyState(_vks[i]);
+            down[i] = (state & 0x8000) != 0;
+            tapped[i] = (state & 1) != 0;
+        }
+        var was = _vkWasDown;
         _vkWasDown = down;
-        return pressed && GameHasFocus();
+        return ChordPressed(down.Length, i => down[i] || tapped[i], i => (down[i] && !was[i]) || (tapped[i] && !down[i])) && GameHasFocus();
     }
 
     private bool GameHasFocus()

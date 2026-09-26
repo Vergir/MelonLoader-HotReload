@@ -158,6 +158,26 @@ public class KeyNameTests
         Assert.Equal(expected, KeyInput.VirtualKey(keyCode));
 
     [Theory]
+    [InlineData("F8", new[] { "F8" })]
+    [InlineData("LeftControl+F8", new[] { "LeftControl", "F8" })]
+    [InlineData(" JoystickButton4 + JoystickButton5 ", new[] { "JoystickButton4", "JoystickButton5" })]
+    [InlineData("F8++", new[] { "F8" })]
+    [InlineData("None", new string[0])]
+    [InlineData("", new string[0])]
+    public void Chords_are_parsed(string keyName, string[] expected) =>
+        Assert.Equal(expected, KeyInput.ParseChord(keyName));
+
+    [Fact]
+    public void A_chord_fires_only_when_all_keys_are_held_and_one_just_went_down()
+    {
+        bool Fire(bool[] held, bool[] down) => KeyInput.ChordPressed(held.Length, i => held[i], i => down[i]);
+        Assert.True(Fire(new[] { true, true }, new[] { false, true }));    // Ctrl held, F8 goes down
+        Assert.False(Fire(new[] { false, true }, new[] { false, true }));  // F8 alone
+        Assert.False(Fire(new[] { true, true }, new[] { false, false }));  // both held, nothing new
+        Assert.True(Fire(new[] { true }, new[] { true }));                 // single key
+    }
+
+    [Theory]
     [InlineData("F25")]
     [InlineData("Mouse0")]
     [InlineData("Nonsense")]

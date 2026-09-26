@@ -74,6 +74,7 @@ public class HotReloadPlugin : MelonPlugin
     {
         // Runs at application start, before any mod's OnInitializeMelon: every mod is loaded and Unity types are usable.
         bool ddol = UnityApi.InstallPersistentObjectTracking(HarmonyInstance, LoggerInstance);
+        int bundleHooks = AssetBundles.InstallTracking(HarmonyInstance, LoggerInstance);
         _keys = new KeyInput(LoggerInstance);
         WatchConfigFile();
         _reloader = new Reloader(LoggerInstance, typeof(HotReloadPlugin).Assembly.GetName().Name!, IsIgnored,
@@ -85,7 +86,8 @@ public class HotReloadPlugin : MelonPlugin
         _reloader.Snapshot(WatchedFiles());
         LoggerInstance.Msg("MelonLoader " + LoaderVersion() + ", " + Compat.RuntimeDescription() + (Compat.IsMono ? " (Mono game)" : " (IL2CPP game)") + ". Shadow copy: " + _shadowStatus
                            + "; Assembly.Location patch: " + (_locationPatched ? "on" : "off")
-                           + "; DontDestroyOnLoad tracking: " + (ddol ? "on" : "off") + ReinjectionStatus() + "; reload key: " + _keys.Describe() + ".");
+                           + "; DontDestroyOnLoad tracking: " + (ddol ? "on" : "off")
+                           + "; AssetBundle tracking: " + (bundleHooks > 0 ? bundleHooks + " load method(s)" : "fields only") + ReinjectionStatus() + "; reload key: " + _keys.Describe() + ".");
         if (_shadowCopy.Value) LoggerInstance.Msg(StartupLoader.Describe());
     }
 

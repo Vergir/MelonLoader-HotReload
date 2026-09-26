@@ -26,6 +26,9 @@
     <Reference Include="$(MonoGameDir)\*_Data\Managed\UnityEngine.CoreModule.dll"><Private>false</Private></Reference>
     <Reference Include="$(MonoGameDir)\*_Data\Managed\UnityEngine.UI.dll"><Private>false</Private></Reference>
     <ProjectReference Include="..\HRTestLib\HRTestLib.csproj" Private="false" />
+    <Reference Include="$(MonoGameDir)\*_Data\Managed\UnityEngine.AssetBundleModule.dll"><Private>false</Private></Reference>
+    <Reference Include="MonoMod.RuntimeDetour"><HintPath>$(MLDir)\MonoMod.RuntimeDetour.dll</HintPath><Private>false</Private></Reference>
+    <ProjectReference Include="..\HRTestPlugin\HRTestPlugin.csproj" Private="false" PrivateAssets="all" AdditionalProperties="Version=1.0.0;DeployToGame=false" />
   </ItemGroup>
   <Target Name="DeployToGame" AfterTargets="Build" Condition="'$(DeployToGame)' == 'true' And Exists('$(MonoGameDir)\$(DeployFolder)')">
     <PropertyGroup><_DeployStamp>$([System.DateTime]::UtcNow.Ticks)</_DeployStamp></PropertyGroup>

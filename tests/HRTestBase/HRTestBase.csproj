@@ -29,6 +29,10 @@
     <Reference Include="UnityEngine.CoreModule"><HintPath>$(InteropDir)\UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.UI"><HintPath>$(InteropDir)\UnityEngine.UI.dll</HintPath><Private>false</Private></Reference>
     <ProjectReference Include="..\HRTestLib\HRTestLib.csproj" Private="false" />
+    <Reference Include="UnityEngine.AssetBundleModule"><HintPath>$(InteropDir)\UnityEngine.AssetBundleModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="MonoMod.RuntimeDetour"><HintPath>$(MLDir)\MonoMod.RuntimeDetour.dll</HintPath><Private>false</Private></Reference>
+    <!-- Hook target (HRTestPlugin.Probe). Built with a fixed version and not deployed, so rebuilding HRTestBase does not reload the plugin; PrivateAssets keeps it from flowing to HRTestDependent as a plain (deploying) reference. -->
+    <ProjectReference Include="..\HRTestPlugin\HRTestPlugin.csproj" Private="false" PrivateAssets="all" AdditionalProperties="Version=1.0.0;DeployToGame=false" />
   </ItemGroup>
 
   <Target Name="DeployToGame" AfterTargets="Build" Condition="'$(DeployToGame)' == 'true' And Exists('$(GameDir)\$(DeployFolder)')">
