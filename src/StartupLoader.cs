@@ -11,7 +11,7 @@ using MelonLoader.Utils;
 namespace HotReload;
 
 /// <summary>
-/// Keeps Mods/*.dll unlocked while the game runs. MelonLoader loads mods with LoadFromAssemblyPath, which keeps the file
+/// Keeps Mods/*.dll (and DLLs in manifest subfolders of Mods/) unlocked while the game runs. MelonLoader loads mods with LoadFromAssemblyPath, which keeps the file
 /// open, so a build cannot overwrite it. HotReload registers before mods are loaded, copies Mods/*.dll (+pdb) to a
 /// per-session shadow folder and swaps that folder into MelonLoader's list of mod folders. MelonLoader locks the copies;
 /// the originals stay free for builds, and HotReload maps every path back to Mods/.
@@ -24,6 +24,17 @@ internal static class StartupLoader
 {
     private static readonly ConditionalWeakTable<Assembly, string> Locations = new ConditionalWeakTable<Assembly, string>();
     private static readonly Dictionary<string, string> ShadowToMods = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    private static readonly List<string> OriginalModDirs = new List<string>();
+
+    /// <summary>The mod folders MelonLoader loads from (Mods/ and its manifest subfolders), as the user sees them.</summary>
+    public static IEnumerable<string> ModDirectories() =>
+        OriginalModDirs.Count > 0 ? OriginalModDirs : new[] { Path.GetFullPath(MelonEnvironment.ModsDirectory) };
+
+    private static bool IsUnder(string dir, string root)
+    {
+        var d = Path.GetFullPath(dir).TrimEnd('\\', '/');
+        return string.Equals(d, root, StringComparison.OrdinalIgnoreCase) || d.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+    }
     private static readonly PropertyInfo? MelonAssemblyLocation = typeof(MelonAssembly).GetProperty(nameof(MelonAssembly.Location));
     private static MelonLogger.Instance _log = null!;
     private static bool _locationPatched;
@@ -120,8 +131,9 @@ internal static class StartupLoader
             }
             var dirs = (List<string>)field.GetValue(null)!;
             var mods = Path.GetFullPath(MelonEnvironment.ModsDirectory).TrimEnd('\\', '/');
-            int idx = dirs.FindIndex(d => string.Equals(Path.GetFullPath(d).TrimEnd('\\', '/'), mods, StringComparison.OrdinalIgnoreCase));
-            if (idx < 0) { log.Warning("Mods folder not in MelonLoader's folder list; mod DLLs stay locked."); return "unavailable (Mods not in folder list)"; }
+            // Mods/ itself and the subfolders MelonLoader added (those with a manifest.json).
+            var modIdx = Enumerable.Range(0, dirs.Count).Where(i => IsUnder(dirs[i], mods)).ToList();
+            if (modIdx.Count == 0) { log.Warning("Mods folder not in MelonLoader's folder list; mod DLLs stay locked."); return "unavailable (Mods not in folder list)"; }
 
             var root = Path.Combine(MelonEnvironment.UserDataDirectory, "HotReload", "Shadow");
             Directory.CreateDirectory(root);
@@ -131,14 +143,22 @@ internal static class StartupLoader
             }
             _shadowDir = Path.Combine(root, Environment.ProcessId.ToString());
             Directory.CreateDirectory(_shadowDir);
-            foreach (var f in Directory.EnumerateFiles(mods, "*.*", SearchOption.TopDirectoryOnly)
-                         .Where(f => f.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase)))
+            foreach (var i in modIdx)
             {
-                var copy = Path.Combine(_shadowDir, Path.GetFileName(f));
-                File.Copy(f, copy, overwrite: true);
-                ShadowToMods[copy] = f;
+                var original = Path.GetFullPath(dirs[i]).TrimEnd('\\', '/');
+                var rel = Path.GetRelativePath(mods, original);
+                var target = rel == "." ? _shadowDir : Path.Combine(_shadowDir, "sub", rel);
+                Directory.CreateDirectory(target);
+                foreach (var f in Directory.EnumerateFiles(original, "*.*", SearchOption.TopDirectoryOnly)
+                             .Where(f => f.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase)))
+                {
+                    var copy = Path.Combine(target, Path.GetFileName(f));
+                    File.Copy(f, copy, overwrite: true);
+                    ShadowToMods[Path.GetFullPath(copy)] = f;
+                }
+                OriginalModDirs.Add(original);
+                dirs[i] = target;
             }
-            dirs[idx] = _shadowDir;
 
             // Map paths back as soon as MelonLoader has an Assembly / a melon, before mods run any code.
             MelonAssembly.OnAssemblyResolving.Subscribe(OnAssemblyResolving);

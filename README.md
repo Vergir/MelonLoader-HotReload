@@ -7,7 +7,8 @@ MelonLoader plugin for mod authors: rebuild a mod and the running game picks it 
 |---|---|
 | Games | IL2CPP only. MelonLoader refuses to load it in Mono games, where it would not work. |
 | MelonLoader | 0.6.0 or newer. Every API it uses exists in the 0.6.0-0.7.3 release binaries. Shadow-copying `Mods/` needs 0.7.1+; on older versions mod DLLs stay locked and builds need the rename-then-copy deploy step below. |
-| Tested in-game | MelonLoader 0.7.3 in No Rest for the Wicked (Unity 6000.1, .NET 6.0.16), 2026-09-26. |
+| Tested in-game | MelonLoader 0.7.3 in No Rest for the Wicked (Unity 6000.1, .NET 6.0.16), 2026-09-26: own test mods, MoreAspectRatios, NRftW Item Manager, UnityExplorer 4.13.2 with UniverseLib. |
+| Not supported | Mono games. They need a separate build (older .NET, no `AssemblyLoadContext`, and Mono binds a reloaded mod's references to the first-loaded copy of a library, so libraries would need renaming per reload). |
 
 At startup it logs what it could enable, e.g.
 `MelonLoader 0.7.3, .NET 6.0.16. Shadow copy: on; Assembly.Location patch: on; DontDestroyOnLoad tracking: on; reload key: F8 (legacy Input).`
@@ -21,8 +22,12 @@ Each feature degrades on its own: if a MelonLoader internal is missing, that fea
    `[HotReload] Reloaded X 1.0.0 -> 1.0.1 (Harmony: 6 method(s) unpatched, 6 patched; replayed 4 scene(s)) in 110 ms`.
 3. **F8** reloads every mod whose DLL changed, for when auto reload is off or a file event was missed.
 
-Also handled: deleting a mod DLL from `Mods/` unloads that mod, a new mod DLL dropped into `Mods/` is loaded, and mods that
-reference a reloaded mod are reloaded after it.
+Watched and reloaded: mods in `Mods/` and its manifest subfolders, other plugins in `Plugins/`, and libraries in `UserLibs/`.
+Deleting a mod or plugin DLL unloads it, and a new mod DLL dropped in is loaded. Mods that reference a reloaded assembly
+reload with it, and so do the stateful libraries a reloaded mod uses (see below).
+
+`Mods/` DLLs are never locked, so a plain copy works. `Plugins/` and `UserLibs/` are loaded before HotReload, so their DLLs are
+locked while the game runs: deploy those with the rename-then-copy step below.
 
 ## Config: `<game>/UserData/HotReload.toml`
 
@@ -37,13 +42,20 @@ Created on first launch. Edits apply immediately, except `ShadowCopyMods`.
 | `DebounceMs` | `500` | Quiet time after the last file event before reloading. |
 | `ShadowCopyMods` | `true` | MelonLoader loads `Mods/*.dll` from copies in `UserData/HotReload/Shadow`, so the originals are never locked. Restart to apply. |
 | `ReplaySceneEvents` | `true` | After a reload, call the mod's `OnSceneWasLoaded` / `OnSceneWasInitialized` for scenes already open. |
-| `ReloadDependents` | `true` | After a mod reloads, reload the loaded mods that reference it. |
+| `ReloadDependents` | `true` | Reload the loaded mods and libraries that reference a reloaded assembly, in the same group. |
+| `FreshLibraries` | `true` | Reload the `UserLibs` libraries a mod uses together with it, so state the old build registered with them is gone. Only libraries that reference MelonLoader, Il2CppInterop or Unity; other mods using the same library reload too. |
 | `RetireOldBuild` | `true` | Turn the old build's delegate targets and coroutine/async steps into no-ops after a reload (see below). |
 | `DestroyOldObjects` | `true` | Destroy the GameObjects the old build passed to `DontDestroyOnLoad`, and live instances of its injected Il2Cpp classes. |
 | `InputBackend` | `"Auto"` | How the reload key is read. `Auto` tries legacy `UnityEngine.Input`, then the Input System package (by reflection, for games that disabled legacy input), then the Windows key state while the game has focus (also under Wine/Proton). Or force `Legacy`, `InputSystem` or `Windows`. |
 
 ## What a reload does
 
+A change reloads a **group**: the changed assembly, the loaded mods and libraries that reference it, and (with
+`FreshLibraries`) the stateful libraries those mods use. Example from the tests:
+`Reloading together: HRTestLib (library used by HRTestBase), HRTestBase (changed), HRTestDependent (references HRTestBase)`.
+The group goes down dependents-first and comes up libraries-first, so every mod binds to the fresh libraries. Per assembly:
+
+0. The old build's state is saved if it opts in (see "State handoff").
 1. `MelonAssembly.UnregisterMelons`: the mod's `OnDeinitializeMelon` runs, MelonLoader callbacks are unsubscribed, and its
    `HarmonyInstance` is unpatched.
 2. Every remaining Harmony patch whose patch method lives in the old assembly is removed, whatever Harmony instance made it.
@@ -55,10 +67,24 @@ Created on first launch. Edits apply immediately, except `ShadowCopyMods`.
 4. The new DLL is copied, with its `.pdb`, into this session's shadow folder and loaded from there into its own
    `AssemblyLoadContext`. `Assembly.Location` reports the `Mods/` path.
 5. Its melons are registered: `OnEarlyInitializeMelon`, Harmony auto-patching, `OnInitializeMelon`, `OnLateInitializeMelon`.
-   The obsolete `OnApplicationStart` / `OnApplicationLateStart`, which hang off one-time events that already fired, are called
-   by HotReload if the mod overrides them.
-6. Scene callbacks are replayed for the scenes already open.
-7. Loaded mods that reference it are reloaded the same way, so they call the new build.
+   Start callbacks that hang off one-time events that already fired are called by HotReload if the melon overrides them:
+   the obsolete `OnApplicationStart` / `OnApplicationLateStart` (UnityExplorer starts from the first) and a plugin's
+   `OnApplicationStarted`. A plugin's earlier hooks (`OnPreInitialization`, `OnApplicationEarlyStart`, `OnPreModsLoaded`)
+   belong to game startup and are not re-run.
+6. Saved state is handed to the new build, and scene callbacks are replayed for the scenes already open.
+
+## State handoff
+
+Static and instance fields start fresh after a reload. A melon can hand state over, without referencing HotReload:
+
+```csharp
+private object OnHotReloadSaveState() => new Dictionary<string, object> { ["count"] = _count };   // old build
+private void OnHotReloadRestoreState(object state) => _count = (int)((Dictionary<string, object>)state)["count"]; // new build
+```
+
+Save runs before the old build is unregistered, restore after the new build's `OnInitializeMelon`; melons are matched by
+name. Use framework types only (primitives, string, arrays, `List`/`Dictionary` of those, or a JSON string): the old and new
+builds are different assemblies, so an object of the old build's own classes cannot be cast by the new one.
 
 ## Retiring the old build
 
@@ -83,10 +109,10 @@ Nothing is strictly off-limits any more. Il2Cpp class injection (`ClassInjector.
 so HotReload removes the old build's names from `ClassInjector.InjectedTypes` and `InjectorHelpers.s_ClassNameLookup`
 after destroying the old instances and retiring their methods. Code that looks a class up by name gets the new one.
 
-* **State held by a helper library that is not reloaded.** A library in `UserLibs` keeps whatever the old build registered
-  with it. UnityExplorer is the known case: it registers its UI and its log callback with UniverseLib. The reloaded build
-  starts, re-injects its classes and re-applies its patches, but UniverseLib still holds the old UI registration, so the new
-  UI is not created. Reloading libraries is on the roadmap.
+State a mod registered with a helper library is reset by reloading the library with it (`FreshLibraries`). UnityExplorer
+is the known case: it registers its UI and log callback with UniverseLib; with UniverseLib reloaded alongside, UnityExplorer
+comes back fully initialized after a hot reload. A library in `Mods/` (loaded on demand, not a MelonLoader library) is not
+reloaded.
 
 What HotReload cannot undo, so the mod must in `OnDeinitializeMelon`:
 
@@ -97,8 +123,8 @@ What HotReload cannot undo, so the mod must in `OnDeinitializeMelon`:
 * **Game state the mod changed**, such as static fields: re-apply it in `OnInitializeMelon`, because the new build starts
   with fresh static state.
 
-Other limits: old assemblies stay in memory, about the DLL's size per reload. `MelonPlugin`s and DLLs in `Mods/` subfolders or
-`UserLibs` are not reloaded. HotReload cannot reload itself.
+Other limits: old assemblies stay in memory, about the DLL's size per reload. HotReload cannot reload itself. Mono
+games are not supported (see "Compatibility").
 
 ## Checking existing mods: `checker/`
 
@@ -117,7 +143,6 @@ dotnet checker/bin/Release/net8.0/HotReloadCheck.dll <dll-or-folder>... --md rep
 | REVIEW | Uses something HotReload cannot clean up, but has `OnDeinitializeMelon`; check that it undoes it. |
 | NEEDS CLEANUP | Uses something HotReload cannot clean up and has no `OnDeinitializeMelon`. |
 | BLOCKED | Uses something HotReload cannot reload (no current rule produces this). |
-| PLUGIN | A `MelonPlugin`; not reloaded. |
 | UNSUPPORTED | Built for a Mono game, or for MelonLoader 0.5 (Unhollower). |
 
 A static scan cannot tell whether `OnDeinitializeMelon` undoes everything, and misses behaviour hidden behind reflection or
@@ -127,8 +152,10 @@ obfuscation. REVIEW means "read the cleanup code or try it".
 
 `HRTestBase` uses a separate Harmony instance, a reflective preference category, a category with an unrelated name,
 scene callbacks, a `DontDestroyOnLoad` object, an endless coroutine, a timer and an injected `MonoBehaviour`, and cleans up
-none of them. `HRTestDependent`
-references it. Build `tests/HRTestDependent` to deploy both, then rebuild `HRTestBase` with `-p:Version=1.0.1` while the game runs.
+none of them; it registers with the library `HRTestLib` (UserLibs), which refuses duplicate registrations, and hands state
+over. `HRTestDependent` references it and deploys into the manifest subfolder `Mods/HRTestSub/` (create it with a
+`manifest.json` first). `HRTestPlugin` is a plugin. Build each once, start the game, then rebuild `HRTestBase` with
+`-p:Version=1.0.1 -p:BuildProjectReferences=false` (mod only) or without the second switch (library too).
 
 ## Building
 

@@ -8,7 +8,7 @@ using HotReload;
 using MelonLoader;
 using MelonLoader.Utils;
 
-[assembly: MelonInfo(typeof(HotReloadPlugin), "HotReload", "0.6.0", "vergir")]
+[assembly: MelonInfo(typeof(HotReloadPlugin), "HotReload", "0.7.0", "vergir")]
 // No MelonGame attribute: works in any IL2CPP game. Every API it binds to exists since MelonLoader 0.6.0
 // (checked against the 0.6.0-0.7.3 release binaries); shadow-copying Mods/ needs 0.7.1+.
 [assembly: MelonPlatformDomain(MelonPlatformDomainAttribute.CompatibleDomains.IL2CPP)]
@@ -42,6 +42,7 @@ public class HotReloadPlugin : MelonPlugin
     private MelonPreferences_Entry<bool> _reloadDependents = null!;
     private MelonPreferences_Entry<bool> _retireOldBuild = null!;
     private MelonPreferences_Entry<bool> _destroyPersistent = null!;
+    private MelonPreferences_Entry<bool> _freshLibraries = null!;
 
     private Reloader _reloader = null!;
     private KeyInput _keys = null!;
@@ -74,7 +75,7 @@ public class HotReloadPlugin : MelonPlugin
         WatchConfigFile();
         _reloader = new Reloader(LoggerInstance, typeof(HotReloadPlugin).Assembly.GetName().Name!, IsIgnored,
             replayScenes: () => _replayScenes.Value, reloadDependents: () => _reloadDependents.Value,
-            retireOldBuild: () => _retireOldBuild.Value, destroyPersistent: () => _destroyPersistent.Value);
+            retireOldBuild: () => _retireOldBuild.Value, destroyOld: () => _destroyPersistent.Value, freshLibraries: () => _freshLibraries.Value);
         CleanupOldFiles();
         StartupLoader.FixAllLocations();
         ApplyConfig();
@@ -109,6 +110,8 @@ public class HotReloadPlugin : MelonPlugin
             description: "After a reload, turn the old build's delegate targets and coroutine/async steps into no-ops, so callbacks, coroutines and timers it left behind stop instead of running old code.");
         _destroyPersistent = _cat.CreateEntry("DestroyOldObjects", true,
             description: "After a reload, destroy the GameObjects the old build passed to DontDestroyOnLoad (UI roots, canvases, EventSystems) and live instances of the old build's injected Il2Cpp classes.");
+        _freshLibraries = _cat.CreateEntry("FreshLibraries", true,
+            description: "Reload the UserLibs libraries a mod uses together with it (only libraries that reference MelonLoader, Il2CppInterop or Unity), so state the old build registered with them is gone. Mods sharing such a library reload too.");
         _inputBackend = _cat.CreateEntry("InputBackend", "Auto",
             description: "How the reload key is read: Auto (legacy Input, then Input System, then Windows key state), Legacy, InputSystem or Windows.");
         _cat.SaveToFile(false); // writes the file with defaults and descriptions on first run
@@ -245,7 +248,9 @@ public class HotReloadPlugin : MelonPlugin
     /// <summary>Directories + file filters to watch: Mods/*.dll and each extra path.</summary>
     private IEnumerable<(string dir, string filter)> WatchTargets()
     {
-        yield return (MelonEnvironment.ModsDirectory, "*.dll");
+        // Mods/ and its manifest subfolders, Plugins/ (other plugins), UserLibs/ (libraries).
+        foreach (var dir in LoaderFolders.MelonFolders().Append(LoaderFolders.UserLibs).Distinct(StringComparer.OrdinalIgnoreCase))
+            if (Directory.Exists(dir)) yield return (dir, "*.dll");
         foreach (var raw in _extraWatchPaths.Value ?? Array.Empty<string>())
         {
             var p = (raw ?? "").Trim().Trim('"');
@@ -270,7 +275,7 @@ public class HotReloadPlugin : MelonPlugin
     {
         try
         {
-            foreach (var dir in new[] { MelonEnvironment.ModsDirectory, MelonEnvironment.PluginsDirectory })
+            foreach (var dir in LoaderFolders.MelonFolders().Append(LoaderFolders.UserLibs).Where(Directory.Exists))
                 foreach (var f in Directory.EnumerateFiles(dir, "*" + OldFileSuffix))
                 {
                     try { File.Delete(f); } catch { /* still locked by something else; next launch */ }

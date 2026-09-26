@@ -16,7 +16,7 @@
     <GameDir Condition="'$(GameDir)' == ''">$(MELONLOADER_GAME_DIR)</GameDir>
     <MLDir>$(GameDir)\MelonLoader\net6</MLDir>
     <InteropDir>$(GameDir)\MelonLoader\Il2CppAssemblies</InteropDir>
-    <DeployFolder>Mods</DeployFolder>
+    <DeployFolder>Mods\HRTestSub</DeployFolder>
     <DeployToGame Condition="'$(DeployToGame)' == ''">true</DeployToGame>
   </PropertyGroup>
   <ItemGroup>

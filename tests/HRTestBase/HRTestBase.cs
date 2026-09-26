@@ -43,6 +43,9 @@ public class HRTestBaseMod : MelonMod
 
         LoggerInstance.Msg(Greeting() + ", init #" + cfg.InitCount + ", Assembly.Location='" + typeof(HRTestBaseMod).Assembly.Location + "'");
 
+        // A library that refuses a second registration: works only if HotReload reloads the library too (0.7).
+        HRTestLib.Registry.Register("hrtestbase");
+
         // A plain category whose name has nothing to do with the mod: found through this static field on reload.
         var settings = MelonPreferences.CreateCategory("HRTest Unrelated Name");
         _reloads = settings.CreateEntry("Reloads", 0);
@@ -64,6 +67,21 @@ public class HRTestBaseMod : MelonMod
 
     private static MelonPreferences_Entry<int> _reloads = null!;
     private const string PersistentName = "HRTestBase_Persistent";
+
+    // State handoff (0.7): framework types only, the old and new builds do not share classes.
+    private int _reloadsSeen;
+
+    private object OnHotReloadSaveState() => new System.Collections.Generic.Dictionary<string, object>
+    {
+        ["reloadsSeen"] = _reloadsSeen, ["from"] = Greeting(),
+    };
+
+    private void OnHotReloadRestoreState(object state)
+    {
+        var d = (System.Collections.Generic.Dictionary<string, object>)state;
+        _reloadsSeen = (int)d["reloadsSeen"] + 1;
+        LoggerInstance.Msg("state restored from " + d["from"] + ", reloads seen: " + _reloadsSeen);
+    }
     private static System.Threading.Timer? _timer; // no cleanup on purpose
     private int _frames;
 

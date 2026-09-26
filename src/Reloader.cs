@@ -14,41 +14,56 @@ using MelonLoader.Utils;
 namespace HotReload;
 
 /// <summary>
-/// Unregisters the melons of an assembly and loads a new build of it into a fresh AssemblyLoadContext.
-/// Old assemblies are never unloaded (MelonLoader, Harmony and Il2CppInterop keep references); each reload costs the DLL's size in memory.
+/// Reloads a group of assemblies: the one whose file changed, the loaded mods that reference it, and (optionally) the
+/// stateful helper libraries those mods use, so every reloaded mod starts on fresh library state. The group is taken
+/// down dependents-first (state handoff saved, melons unregistered, patches removed, old build retired, preference
+/// categories and injected class names released) and brought up libraries-first, each new build in its own
+/// AssemblyLoadContext. Old assemblies are never unloaded; each reload costs the DLLs' size in memory.
 /// </summary>
 internal sealed class Reloader
 {
     public enum Result { Unchanged, Reloaded, Unloaded, Skipped, NotReady, Failed }
 
-    /// <summary>Newest loaded Assembly per simple name, so a reloaded mod that references another reloaded mod binds to its newest build.</summary>
+    /// <summary>Newest loaded Assembly per simple name, so a reloaded assembly binds to the newest build of the others.</summary>
     internal static readonly Dictionary<string, Assembly> Latest = new Dictionary<string, Assembly>(StringComparer.OrdinalIgnoreCase);
 
     private static readonly FieldInfo? LoadedAssembliesField =
         typeof(MelonAssembly).GetField("loadedAssemblies", BindingFlags.NonPublic | BindingFlags.Static);
 
+    /// <summary>One assembly of a reload group.</summary>
+    private sealed class Item
+    {
+        public string Name = "", Path = "", Hash = "", Reason = "";
+        public byte[] Bytes = Array.Empty<byte>();
+        public bool IsLibrary;
+        public List<MelonAssembly> OldLoaded = new();
+        public HashSet<Assembly> OldAssemblies = new();
+        public List<MelonBase> OldMelons = new();
+        public string? OldVersion;
+        public int PatchedBefore;
+        public Dictionary<string, object?> SavedState = new();
+    }
+
     private readonly MelonLogger.Instance _log;
     private readonly string _selfName;
     private readonly Func<string, bool> _isIgnored;
-    private readonly Func<bool> _replayScenes;
-    private readonly Func<bool> _reloadDependents;
-    private readonly Func<bool> _retireOldBuild;
-    private readonly Func<bool> _destroyPersistent;
-    private readonly Dictionary<string, string> _hash = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);   // assembly name -> SHA256 of the loaded bytes
-    private readonly Dictionary<string, string> _source = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); // assembly name -> file it was loaded from
-    private readonly HashSet<string> _warnedOnce = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    private readonly Func<bool> _replayScenes, _reloadDependents, _retireOldBuild, _destroyOld, _freshLibraries;
+    private readonly Dictionary<string, string> _hash = new(StringComparer.OrdinalIgnoreCase);   // assembly name -> SHA256 of the loaded bytes
+    private readonly Dictionary<string, string> _source = new(StringComparer.OrdinalIgnoreCase); // assembly name -> file it was loaded from
+    private readonly HashSet<string> _warnedOnce = new(StringComparer.OrdinalIgnoreCase);
     private int _generation;
 
     public Reloader(MelonLogger.Instance log, string selfName, Func<string, bool> isIgnored, Func<bool> replayScenes, Func<bool> reloadDependents,
-        Func<bool> retireOldBuild, Func<bool> destroyPersistent)
+        Func<bool> retireOldBuild, Func<bool> destroyOld, Func<bool> freshLibraries)
     {
-        _retireOldBuild = retireOldBuild;
-        _destroyPersistent = destroyPersistent;
         _log = log;
         _selfName = selfName;
         _isIgnored = isIgnored;
         _replayScenes = replayScenes;
         _reloadDependents = reloadDependents;
+        _retireOldBuild = retireOldBuild;
+        _destroyOld = destroyOld;
+        _freshLibraries = freshLibraries;
         if (LoadedAssembliesField == null)
             _log.Error("MelonAssembly.loadedAssemblies not found; this MelonLoader version is not supported. Reloads will fail.");
     }
@@ -61,26 +76,25 @@ internal sealed class Reloader
             var name = ma.Assembly.GetName().Name;
             if (name == null || string.IsNullOrEmpty(ma.Location) || !File.Exists(ma.Location)) continue;
             if (TryRead(ma.Location, out var bytes)) _hash[name] = Sha256(bytes);
-            _source[name] = Path.GetFullPath(ma.Location);
+            _source[name] = System.IO.Path.GetFullPath(ma.Location);
         }
-        // Watched DLLs that are not loaded (e.g. an extra bin/Release folder of a mod that is not in Mods yet) are new mods on their next change.
         int watched = watchedFiles.Count();
-        _log.Msg("Tracking " + _hash.Count + " loaded melon assemblies, " + watched + " watched DLL(s).");
+        _log.Msg("Tracking " + _hash.Count + " loaded melon assemblies and libraries, " + watched + " watched DLL(s).");
     }
 
-    /// <summary>Mod DLLs in Mods/ that were deleted while the game runs (their mod gets unloaded).</summary>
+    /// <summary>Mod and plugin DLLs that were deleted while the game runs (their melons get unloaded).</summary>
     public IEnumerable<string> MissingSources() =>
-        _source.Values.Where(p => IsInMods(p) && !File.Exists(p)).ToList();
+        _source.Where(kv => LoaderFolders.CanUnload(kv.Value) && !File.Exists(kv.Value) && !IsLibrary(kv.Key)).Select(kv => kv.Value).ToList();
 
     public Result ProcessFile(string path)
     {
-        path = Path.GetFullPath(path);
+        path = System.IO.Path.GetFullPath(path);
 
         if (!File.Exists(path))
         {
-            // Only a deletion from Mods/ unloads; cleaning a bin folder must not.
+            // Only a deletion from a MelonLoader folder unloads; cleaning a bin folder must not.
             var gone = _source.FirstOrDefault(kv => PathEquals(kv.Value, path)).Key;
-            if (gone == null || !IsInMods(path) || gone == _selfName) return Result.Skipped;
+            if (gone == null || !LoaderFolders.CanUnload(path) || gone == _selfName || IsLibrary(gone)) return Result.Skipped;
             return Unload(gone) ? Result.Unloaded : Result.Skipped;
         }
 
@@ -96,136 +110,192 @@ internal sealed class Reloader
 
         var hash = Sha256(bytes);
         if (_hash.TryGetValue(name, out var known) && known == hash) return Result.Unchanged;
-        if (!isMelon)
+        if (!isMelon && !IsLibrary(name))
         {
             _hash[name] = hash;
-            if (_warnedOnce.Add(name)) _log.Msg(Path.GetFileName(path) + " has no [MelonInfo]; not a mod, ignored.");
+            if (_warnedOnce.Add(name)) _log.Msg(System.IO.Path.GetFileName(path) + " has no [MelonInfo] and is not a loaded library; ignored.");
             return Result.Skipped;
         }
-        return Reload(name, path, bytes, hash, new HashSet<string>(StringComparer.OrdinalIgnoreCase)) ? Result.Reloaded : Result.Failed;
+        var root = new Item { Name = name, Path = path, Bytes = bytes, Hash = hash, IsLibrary = !isMelon, Reason = "changed" };
+        return ReloadGroup(BuildGroup(root)) ? Result.Reloaded : Result.Failed;
     }
 
-    private bool Reload(string name, string path, byte[] bytes, string hash, HashSet<string> visited, string? becauseOf = null)
+    // ---- Group -------------------------------------------------------------------------------------------------------
+
+    private List<Item> BuildGroup(Item root)
     {
-        visited.Add(name);
+        var items = new Dictionary<string, Item>(StringComparer.OrdinalIgnoreCase) { [root.Name] = root };
+        var queue = new Queue<Item>();
+        queue.Enqueue(root);
+        while (queue.Count > 0)
+        {
+            var item = queue.Dequeue();
+            if (_freshLibraries() && !item.IsLibrary)
+                foreach (var lib in StatefulLibrariesUsedBy(item.Name))
+                    TryAdd(lib, "library used by " + item.Name, isLibrary: true);
+            if (_reloadDependents())
+                foreach (var dep in DependentsOf(item.Name))
+                    TryAdd(dep, (item.IsLibrary ? "uses " : "references ") + item.Name, isLibrary: IsLibrary(dep));
+        }
+        return TopologicalOrder(items.Values.ToList());
+
+        void TryAdd(string name, string reason, bool isLibrary)
+        {
+            if (items.ContainsKey(name) || name == _selfName || _isIgnored(name)) return;
+            if (!_source.TryGetValue(name, out var p) || !File.Exists(p) || !TryRead(p, out var bytes))
+            {
+                if (_warnedOnce.Add("unreadable:" + name)) _log.Warning(name + " (" + reason + ") cannot be read from disk; it is not reloaded with the group.");
+                return;
+            }
+            var it = new Item { Name = name, Path = p, Bytes = bytes, Hash = Sha256(bytes), IsLibrary = isLibrary, Reason = reason };
+            items[name] = it;
+            queue.Enqueue(it);
+        }
+    }
+
+    /// <summary>Referenced assemblies first, so every assembly is loaded after the ones it binds to.</summary>
+    private static List<Item> TopologicalOrder(List<Item> items)
+    {
+        var names = new HashSet<string>(items.Select(i => i.Name), StringComparer.OrdinalIgnoreCase);
+        var refs = items.ToDictionary(i => i.Name, i => ReferencedNames(i.Bytes).Where(names.Contains).ToHashSet(StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase);
+        var ordered = new List<Item>();
+        var placed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        while (ordered.Count < items.Count)
+        {
+            var next = items.FirstOrDefault(i => !placed.Contains(i.Name) && refs[i.Name].All(r => placed.Contains(r) || r == i.Name))
+                       ?? items.First(i => !placed.Contains(i.Name)); // cycle: take any
+            ordered.Add(next);
+            placed.Add(next.Name);
+        }
+        return ordered;
+    }
+
+    private bool ReloadGroup(List<Item> group)
+    {
         var sw = Stopwatch.StartNew();
-        _hash[name] = hash; // even on failure: do not retry the same broken bytes on every event
-        string? oldVersion = null;
+        foreach (var it in group) _hash[it.Name] = it.Hash; // even on failure: do not retry the same broken bytes on every event
+        if (group.Count > 1)
+            _log.Msg("Reloading together: " + string.Join(", ", group.Select(i => i.Name + " (" + i.Reason + ")")));
         try
         {
-            // 1. Unregister the old build: OnDeinitializeMelon, callbacks unsubscribed, melon Harmony patches removed.
-            var oldLoaded = FindLoaded(name).ToList();
-            var oldAssemblies = new HashSet<Assembly>(oldLoaded.Select(a => a.Assembly));
-            var oldMelons = oldLoaded.SelectMany(a => a.LoadedMelons).ToList();
-            int patchedBefore = CountMethodsPatchedFrom(oldAssemblies);
-            foreach (var old in oldLoaded)
+            // ---- Tear down, dependents first ----
+            for (int k = group.Count - 1; k >= 0; k--)
             {
-                oldVersion ??= old.LoadedMelons.FirstOrDefault()?.Info.Version;
-                old.UnregisterMelons("HotReload", silent: true);
-                ForgetMelonAssembly(old);
+                var it = group[k];
+                it.OldLoaded = FindLoaded(it.Name).ToList();
+                it.OldAssemblies = new HashSet<Assembly>(it.OldLoaded.Select(a => a.Assembly));
+                it.OldMelons = it.OldLoaded.SelectMany(a => a.LoadedMelons).ToList();
+                it.OldVersion = it.OldMelons.FirstOrDefault()?.Info.Version ?? it.OldLoaded.FirstOrDefault()?.Assembly.GetName().Version?.ToString();
+                it.PatchedBefore = CountMethodsPatchedFrom(it.OldAssemblies);
+                it.SavedState = StateHandoff.Save(it.OldMelons, _log);
+                foreach (var old in it.OldLoaded)
+                {
+                    old.UnregisterMelons("HotReload", silent: true);
+                    ForgetMelonAssembly(old);
+                }
             }
-            // 1b. Patches the old build made through its own `new Harmony(...)` instances.
-            RemoveRemainingPatches(name, oldAssemblies);
-            // 1c. What the old build left running: objects kept across scenes, delegates, coroutines.
-            RetireOldBuild(name, oldAssemblies, visited);
-            // 2. Let the new build call CreateEntry / CreateCategory<T> again (values are kept in the preferences file).
-            PrefOwnership.ReleaseCategories(name, oldAssemblies, oldMelons, _log);
+            var groupNames = new HashSet<string>(group.Select(i => i.Name), StringComparer.OrdinalIgnoreCase);
+            foreach (var it in group) RemoveRemainingPatches(it.Name, it.OldAssemblies);
+            foreach (var it in group) RetireOldBuild(it.Name, it.OldAssemblies, groupNames);
+            foreach (var it in group) PrefOwnership.ReleaseCategories(it.Name, it.OldAssemblies, it.OldMelons, _log);
 
-            // 3. Load the new build from bytes into its own load context (no file lock; the default context refuses a second
-            //    assembly with the same name).
-            byte[]? pdb = null;
-            var pdbPath = Path.ChangeExtension(path, ".pdb");
-            if (File.Exists(pdbPath) && TryRead(pdbPath, out var pdbBytes)) pdb = pdbBytes;
-            var ctx = new ModLoadContext(name + " #" + (++_generation));
-            Assembly asm;
-            try
-            {
-                // From a copy in the shadow folder: a real Location, and the original in Mods/ stays unlocked.
-                asm = ctx.LoadFromAssemblyPath(StartupLoader.ShadowCopyForReload(path, bytes, pdb, _generation));
-            }
-            catch (IOException)
-            {
-                asm = ctx.LoadFromStream(new MemoryStream(bytes), pdb == null ? null : new MemoryStream(pdb));
-            }
-            StartupLoader.RememberLocation(asm, path);
-            StartupLoader.EnsureLocationPatch(asm, path);
-            Latest[name] = asm;
-
-            // 4. Create and register its melons (OnEarlyInitializeMelon, Harmony auto-patch, OnInitializeMelon, OnLateInitializeMelon).
-            var ma = MelonAssembly.LoadMelonAssembly(path, asm, loadMelons: true);
-            if (ma == null) { _log.Error("Reload of " + name + " failed: MelonLoader could not load the assembly (see above)."); return false; }
-            if (ma.RottenMelons.Count > 0) _log.Error(name + ": " + ma.RottenMelons.Count + " melon(s) failed to load (see above).");
-            MelonBase.RegisterSorted(ma.LoadedMelons);
-            _source[name] = path;
-            foreach (var melon in ma.LoadedMelons.Where(m => m.Registered)) RunMissedStartCallbacks(melon);
-
-            // 5. The scenes that are already open.
-            int scenes = 0;
-            if (_replayScenes())
-                foreach (var mod in ma.LoadedMelons.OfType<MelonMod>().Where(m => m.Registered))
-                    scenes = UnityApi.ReplaySceneEvents(mod);
-
-            int registered = ma.LoadedMelons.Count(m => m.Registered);
-            var newVer = ma.LoadedMelons.FirstOrDefault()?.Info.Version ?? asm.GetName().Version?.ToString() ?? "?";
-            var what = oldVersion == null ? "Loaded new mod " + name + " " + newVer : "Reloaded " + name + " " + oldVersion + " -> " + newVer;
-            if (becauseOf != null) what += " (references " + becauseOf + ")";
-            int patchedAfter = CountMethodsPatchedFrom(new HashSet<Assembly> { asm });
-            what += " (Harmony: " + (oldVersion == null ? "" : patchedBefore + " method(s) unpatched, ") + patchedAfter + " patched"
-                    + (scenes > 0 ? "; replayed " + scenes + " scene(s)" : "") + ")";
-            if (registered == ma.LoadedMelons.Count && registered > 0)
-                _log.Msg(what + " in " + sw.ElapsedMilliseconds + " ms (from " + ShortPath(path) + ")");
-            else
-                _log.Warning(what + ": only " + registered + " of " + ma.LoadedMelons.Count + " melon(s) registered (see above).");
-
-            // 6. Mods that reference this one still call the old build: reload them too.
-            if (registered > 0 && _reloadDependents()) ReloadDependents(name, visited);
-            return registered > 0;
+            // ---- Bring up, libraries (referenced assemblies) first ----
+            bool allOk = true;
+            foreach (var it in group) allOk &= BringUp(it);
+            if (group.Count > 1) _log.Msg("Group reloaded in " + sw.ElapsedMilliseconds + " ms.");
+            return allOk;
         }
         catch (Exception e)
         {
-            _log.Error("Reload of " + name + " failed: " + e);
+            _log.Error("Reload of " + string.Join(", ", group.Select(i => i.Name)) + " failed: " + e);
+            return false;
+        }
+    }
+
+    private bool BringUp(Item it)
+    {
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            byte[]? pdb = null;
+            var pdbPath = System.IO.Path.ChangeExtension(it.Path, ".pdb");
+            if (File.Exists(pdbPath) && TryRead(pdbPath, out var pdbBytes)) pdb = pdbBytes;
+            var ctx = new ModLoadContext(it.Name + " #" + (++_generation));
+            Assembly asm;
+            try
+            {
+                // From a copy in the shadow folder: a real Location, and the original stays unlocked.
+                asm = ctx.LoadFromAssemblyPath(StartupLoader.ShadowCopyForReload(it.Path, it.Bytes, pdb, _generation));
+            }
+            catch (IOException)
+            {
+                asm = ctx.LoadFromStream(new MemoryStream(it.Bytes), pdb == null ? null : new MemoryStream(pdb));
+            }
+            StartupLoader.RememberLocation(asm, it.Path);
+            StartupLoader.EnsureLocationPatch(asm, it.Path);
+            Latest[it.Name] = asm;
+            _source[it.Name] = it.Path;
+
+            // Libraries get a MelonAssembly too (as MelonLoader gives UserLibs one), without melons.
+            var ma = MelonAssembly.LoadMelonAssembly(it.Path, asm, loadMelons: !it.IsLibrary);
+            if (ma == null) { _log.Error("Reload of " + it.Name + " failed: MelonLoader could not load the assembly (see above)."); return false; }
+            if (it.IsLibrary)
+            {
+                _log.Msg("Reloaded library " + it.Name + " (" + it.Reason + ") in " + sw.ElapsedMilliseconds + " ms.");
+                return true;
+            }
+
+            if (ma.RottenMelons.Count > 0) _log.Error(it.Name + ": " + ma.RottenMelons.Count + " melon(s) failed to load (see above).");
+            MelonBase.RegisterSorted(ma.LoadedMelons);
+            var registeredMelons = ma.LoadedMelons.Where(m => m.Registered).ToList();
+            foreach (var melon in registeredMelons) RunMissedStartCallbacks(melon);
+            StateHandoff.Restore(registeredMelons, it.SavedState, _log);
+
+            int scenes = 0;
+            if (_replayScenes())
+                foreach (var mod in registeredMelons.OfType<MelonMod>())
+                    scenes = UnityApi.ReplaySceneEvents(mod);
+
+            var newVer = ma.LoadedMelons.FirstOrDefault()?.Info.Version ?? asm.GetName().Version?.ToString() ?? "?";
+            var kind = ma.LoadedMelons.FirstOrDefault() is MelonPlugin ? "plugin" : "mod";
+            var what = it.OldVersion == null ? "Loaded new " + kind + " " + it.Name + " " + newVer : "Reloaded " + it.Name + " " + it.OldVersion + " -> " + newVer;
+            if (it.Reason != "changed") what += " (" + it.Reason + ")";
+            int patchedAfter = CountMethodsPatchedFrom(new HashSet<Assembly> { asm });
+            what += " (Harmony: " + (it.OldVersion == null ? "" : it.PatchedBefore + " method(s) unpatched, ") + patchedAfter + " patched"
+                    + (scenes > 0 ? "; replayed " + scenes + " scene(s)" : "")
+                    + (it.SavedState.Count > 0 ? "; state handed over" : "") + ")";
+            if (registeredMelons.Count == ma.LoadedMelons.Count && registeredMelons.Count > 0)
+                _log.Msg(what + " in " + sw.ElapsedMilliseconds + " ms (from " + ShortPath(it.Path) + ")");
+            else
+                _log.Warning(what + ": only " + registeredMelons.Count + " of " + ma.LoadedMelons.Count + " melon(s) registered (see above).");
+            return registeredMelons.Count > 0;
+        }
+        catch (Exception e)
+        {
+            _log.Error("Reload of " + it.Name + " failed: " + e);
             return false;
         }
     }
 
     /// <summary>
-    /// MelonLoader calls OnInitializeMelon / OnLateInitializeMelon itself for a melon registered late, but the obsolete
-    /// OnApplicationStart / OnApplicationLateStart are subscribed to one-time events that already fired, so a reloaded
-    /// mod that still uses them (UnityExplorer does) would never start. Call the ones the mod overrides.
+    /// MelonLoader calls OnInitializeMelon / OnLateInitializeMelon itself for a melon registered late, but other start
+    /// callbacks are subscribed to one-time events that already fired, so a reloaded melon that uses them would never
+    /// start: the obsolete OnApplicationStart / OnApplicationLateStart (UnityExplorer uses the first) and a plugin's
+    /// OnApplicationStarted. Call the ones the melon overrides. A plugin's earlier hooks (OnPreInitialization,
+    /// OnApplicationEarlyStart, OnPreModsLoaded) belong to game startup and are not re-run.
     /// </summary>
-    private void RunMissedStartCallbacks(MelonBase melon)
+    private static void RunMissedStartCallbacks(MelonBase melon)
     {
-        foreach (var (callback, fired) in new (string, MelonEvent)[] {
-                     ("OnApplicationStart", MelonEvents.OnApplicationStart),
-                     ("OnApplicationLateStart", MelonEvents.OnApplicationLateStart) })
+        var callbacks = melon is MelonPlugin
+            ? new (string, MelonEvent)[] { ("OnApplicationStarted", MelonEvents.OnApplicationStart), ("OnApplicationLateStart", MelonEvents.OnApplicationLateStart) }
+            : new (string, MelonEvent)[] { ("OnApplicationStart", MelonEvents.OnApplicationStart), ("OnApplicationLateStart", MelonEvents.OnApplicationLateStart) };
+        foreach (var (callback, fired) in callbacks)
         {
             if (!fired.Disposed) continue; // not fired yet: MelonLoader will call it
-            if (callback == "OnApplicationStart" && melon is not MelonMod) continue; // plugins wire it to OnPreModsLoaded
             var m = melon.GetType().GetMethod(callback, BindingFlags.Instance | BindingFlags.Public, null, Type.EmptyTypes, null);
-            if (m == null || m.DeclaringType == typeof(MelonBase) || m.DeclaringType == typeof(MelonMod)) continue; // not overridden
+            if (m == null || m.DeclaringType == typeof(MelonBase) || m.DeclaringType == typeof(MelonMod) || m.DeclaringType == typeof(MelonPlugin)) continue;
             try { m.Invoke(melon, null); }
             catch (TargetInvocationException e) { melon.LoggerInstance.Error(callback + " during hot reload: " + e.InnerException); }
-        }
-    }
-
-    private void ReloadDependents(string name, HashSet<string> visited)
-    {
-        var dependents = MelonAssembly.LoadedAssemblies
-            .Select(a => a.Assembly)
-            .Where(a => a.GetReferencedAssemblies().Any(r => string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase)))
-            .Select(a => a.GetName().Name!)
-            .Where(n => !visited.Contains(n) && n != _selfName && !_isIgnored(n))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        foreach (var dep in dependents)
-        {
-            if (visited.Contains(dep)) continue; // reloaded as a dependent of an earlier dependent
-            if (!_source.TryGetValue(dep, out var depPath) || !File.Exists(depPath) || !TryRead(depPath, out var depBytes))
-            {
-                _log.Warning(dep + " references " + name + " but its DLL cannot be read; it keeps calling the old " + name + ".");
-                continue;
-            }
-            Reload(dep, depPath, depBytes, Sha256(depBytes), visited, becauseOf: name);
         }
     }
 
@@ -246,15 +316,15 @@ internal sealed class Reloader
         _hash.Remove(name);
         _source.Remove(name);
         Latest.Remove(name);
-        _log.Msg("Unloaded " + name + " (its DLL was removed from Mods).");
+        _log.Msg("Unloaded " + name + " (its DLL was removed).");
         return true;
     }
 
-    private void RetireOldBuild(string name, HashSet<Assembly> oldAssemblies, HashSet<string> visited)
+    private void RetireOldBuild(string name, HashSet<Assembly> oldAssemblies, HashSet<string> group)
     {
         var parts = new List<string>();
         var injected = oldAssemblies.SelectMany(InjectedTypes.InjectedIn).ToList();
-        if (_destroyPersistent())
+        if (_destroyOld())
         {
             int destroyed = UnityApi.DestroyPersistentObjects(name, _log);
             if (destroyed > 0) parts.Add("destroyed " + destroyed + " object(s) kept across scenes");
@@ -266,12 +336,8 @@ internal sealed class Reloader
         }
         if (_retireOldBuild())
         {
-            // A mod that references this one and is not reloaded with it would call into the retired build.
-            var stuck = MelonAssembly.LoadedAssemblies
-                .Where(a => !oldAssemblies.Contains(a.Assembly) && a.Assembly.GetReferencedAssemblies().Any(r => string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase)))
-                .Select(a => a.Assembly.GetName().Name!)
-                .Where(n => !visited.Contains(n) && (!_reloadDependents() || _isIgnored(n) || n == _selfName))
-                .ToList();
+            // An assembly that references this one and is not reloaded with it would call into the retired build.
+            var stuck = DependentsOf(name).Where(n => !group.Contains(n)).ToList();
             if (stuck.Count > 0)
                 parts.Add("old build NOT retired because " + string.Join(", ", stuck) + " still use it");
             else
@@ -290,6 +356,53 @@ internal sealed class Reloader
         if (parts.Count > 0) _log.Msg(name + ": " + string.Join("; ", parts) + ".");
     }
 
+    // ---- Dependency queries --------------------------------------------------------------------------------------------
+
+    private static bool IsLibrary(string name)
+    {
+        var loaded = FindLoaded(name).ToList();
+        return loaded.Count > 0 && loaded.All(a => a.LoadedMelons.Count == 0);
+    }
+
+    /// <summary>Loaded melon assemblies and libraries that reference <paramref name="name"/>.</summary>
+    private IEnumerable<string> DependentsOf(string name) =>
+        MelonAssembly.LoadedAssemblies
+            .Where(a => a.Assembly.GetReferencedAssemblies().Any(r => string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase)))
+            .Select(a => a.Assembly.GetName().Name!)
+            .Where(n => !string.Equals(n, name, StringComparison.OrdinalIgnoreCase) && n != _selfName && !_isIgnored(n))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+    /// <summary>
+    /// Loaded libraries (MelonAssemblies without melons, i.e. UserLibs) that <paramref name="name"/> references and that
+    /// can hold mod state: they reference MelonLoader, Il2CppInterop or Unity. Plain libraries (JSON, math) are left alone.
+    /// </summary>
+    private static IEnumerable<string> StatefulLibrariesUsedBy(string name)
+    {
+        var asm = FindLoaded(name).FirstOrDefault()?.Assembly;
+        if (asm == null) yield break;
+        foreach (var r in asm.GetReferencedAssemblies())
+        {
+            if (r.Name == null || !IsLibrary(r.Name)) continue;
+            var lib = FindLoaded(r.Name).First().Assembly;
+            if (lib.GetReferencedAssemblies().Any(x => x.Name is "MelonLoader" or "Il2CppInterop.Runtime" or "UnityEngine.CoreModule" or "UnityEngine"))
+                yield return r.Name;
+        }
+    }
+
+    private static IEnumerable<string> ReferencedNames(byte[] bytes)
+    {
+        var list = new List<string>();
+        try
+        {
+            using var pe = new PEReader(new MemoryStream(bytes));
+            var md = pe.GetMetadataReader();
+            foreach (var h in md.AssemblyReferences) list.Add(md.GetString(md.GetAssemblyReference(h).Name));
+        }
+        catch { }
+        return list;
+    }
+
     private static IEnumerable<MelonAssembly> FindLoaded(string name) =>
         MelonAssembly.LoadedAssemblies.Where(a => string.Equals(a.Assembly.GetName().Name, name, StringComparison.OrdinalIgnoreCase)).ToList();
 
@@ -298,6 +411,8 @@ internal sealed class Reloader
     {
         if (LoadedAssembliesField?.GetValue(null) is List<MelonAssembly> list) list.Remove(ma);
     }
+
+    // ---- Harmony ---------------------------------------------------------------------------------------------------------
 
     private static IEnumerable<HarmonyLib.Patch> AllPatches(HarmonyLib.Patches info) =>
         info.Prefixes.Concat(info.Postfixes).Concat(info.Transpilers).Concat(info.Finalizers).Concat(info.ILManipulators);
@@ -311,6 +426,7 @@ internal sealed class Reloader
     /// <summary>Number of methods carrying at least one patch whose patch method lives in one of these assemblies.</summary>
     private static int CountMethodsPatchedFrom(HashSet<Assembly> assemblies)
     {
+        if (assemblies.Count == 0) return 0;
         try
         {
             return HarmonyLib.Harmony.GetAllPatchedMethods()
@@ -321,10 +437,11 @@ internal sealed class Reloader
 
     /// <summary>
     /// Unregistering only unpatches the melon's own HarmonyInstance. Anything the old build patched through another
-    /// Harmony instance is found by the assembly of the patch method and removed here.
+    /// Harmony instance (or a library patched at all) is found by the assembly of the patch method and removed here.
     /// </summary>
     private void RemoveRemainingPatches(string name, HashSet<Assembly> oldAssemblies)
     {
+        if (oldAssemblies.Count == 0) return;
         int removed = 0, failed = 0;
         foreach (var original in HarmonyLib.Harmony.GetAllPatchedMethods().ToList())
         {
@@ -339,6 +456,8 @@ internal sealed class Reloader
         if (removed > 0) _log.Msg(name + ": removed " + removed + " patch(es) made outside the melon's HarmonyInstance.");
         if (failed > 0) _log.Warning(name + ": " + failed + " patch(es) of the old build are still active.");
     }
+
+    // ---- Files -----------------------------------------------------------------------------------------------------------
 
     private static bool TryRead(string path, out byte[] bytes)
     {
@@ -399,9 +518,6 @@ internal sealed class Reloader
 
     private static string Sha256(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes));
 
-    private static bool IsInMods(string path) =>
-        PathEquals(Path.GetDirectoryName(Path.GetFullPath(path)) ?? "", Path.GetFullPath(MelonEnvironment.ModsDirectory));
-
     private static bool PathEquals(string a, string b) =>
         string.Equals(a.TrimEnd('\\', '/'), b.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
 
@@ -409,6 +525,23 @@ internal sealed class Reloader
     {
         var root = MelonEnvironment.GameRootDirectory;
         return path.StartsWith(root, StringComparison.OrdinalIgnoreCase) ? path.Substring(root.Length).TrimStart('\\', '/') : path;
+    }
+}
+
+/// <summary>The MelonLoader folders HotReload watches, and which of them may unload on delete.</summary>
+internal static class LoaderFolders
+{
+    /// <summary>Folders MelonLoader loads melons from: Mods (and its manifest subfolders) and Plugins.</summary>
+    public static IEnumerable<string> MelonFolders() =>
+        StartupLoader.ModDirectories().Append(MelonEnvironment.PluginsDirectory).Select(System.IO.Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase);
+
+    public static string UserLibs => System.IO.Path.GetFullPath(MelonEnvironment.UserLibsDirectory);
+
+    /// <summary>Deleting a melon DLL from a MelonLoader folder unloads it; deleting from a bin folder does not.</summary>
+    public static bool CanUnload(string path)
+    {
+        var dir = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path)) ?? "";
+        return MelonFolders().Any(d => string.Equals(d.TrimEnd('\\', '/'), dir.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase));
     }
 }
 

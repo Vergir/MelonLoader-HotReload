@@ -7,7 +7,7 @@ using System.Text;
 namespace HotReloadCheck;
 
 /// <summary>
-/// Scans compiled MelonLoader mods (no source needed) and reports whether they can be hot-reloaded by HotReload 0.6,
+/// Scans compiled MelonLoader mods (no source needed) and reports whether they can be hot-reloaded by HotReload 0.7,
 /// and what the author would have to add. It reads metadata only: which APIs a mod references, which types it
 /// defines and which callbacks it overrides. It does not execute or load anything.
 ///
@@ -397,7 +397,6 @@ internal static class Rules
             s.Flavor == Flavor.Mono ? "UNSUPPORTED (Mono game)" :
             s.Flavor == Flavor.Unhollower ? "UNSUPPORTED (MelonLoader 0.5 era)" :
             findings.Any(f => f.Severity == Severity.Blocker) ? "BLOCKED" :
-            s.Kind == MelonKind.Plugin ? "PLUGIN" :
             !findings.Any(f => f.Severity == Severity.Cleanup) ? "READY" :
             hasDeinit ? "REVIEW" : "NEEDS CLEANUP";
         return new Report(s, verdict, findings, deps);
@@ -415,7 +414,7 @@ internal static class Output
         ["READY"] = "nothing found that HotReload cannot clean up; should hot-reload as is",
         ["REVIEW"] = "uses something HotReload cannot clean up, but has OnDeinitializeMelon; check it undoes it",
         ["NEEDS CLEANUP"] = "uses something HotReload cannot clean up and has no OnDeinitializeMelon; author must add cleanup",
-        ["PLUGIN"] = "a MelonPlugin; HotReload only reloads mods in Mods/",
+
         ["BLOCKED"] = "uses something HotReload cannot reload",
         ["UNSUPPORTED (Mono game)"] = "built for a Mono Unity game; HotReload supports IL2CPP games on MelonLoader 0.7 only",
         ["UNSUPPORTED (MelonLoader 0.5 era)"] = "built against Unhollower; does not load on MelonLoader 0.6+ anyway",
@@ -427,7 +426,7 @@ internal static class Output
         var sb = new StringBuilder();
         sb.AppendLine("# HotReload compatibility report");
         sb.AppendLine();
-        sb.AppendLine("Static scan of compiled DLLs (metadata only), against HotReload 0.6. \"Cleanup\" findings are things HotReload cannot undo itself; " +
+        sb.AppendLine("Static scan of compiled DLLs (metadata only), against HotReload 0.7. \"Cleanup\" findings are things HotReload cannot undo itself; " +
                       "whether the mod's OnDeinitializeMelon undoes them needs a look at the code or a test.");
         sb.AppendLine();
         sb.AppendLine("| Mod | Version | Author | Kind | Verdict | Cleanup items | Handled | Depends on |");
@@ -462,7 +461,7 @@ internal static class Output
                 sb.AppendLine($"- **{tag}: {f.Title}.** {f.Advice} Evidence: {ev}");
             }
             if (r.Dependencies.Count > 0)
-                sb.AppendLine($"- **depends on:** {string.Join(", ", r.Dependencies)}. HotReload reloads this mod when a dependency in Mods/ reloads; libraries in UserLibs are not reloaded.");
+                sb.AppendLine($"- **depends on:** {string.Join(", ", r.Dependencies)}. HotReload reloads this mod when one of these reloads, and reloads the stateful UserLibs libraries among them together with this mod.");
             sb.AppendLine();
         }
         return sb.ToString();

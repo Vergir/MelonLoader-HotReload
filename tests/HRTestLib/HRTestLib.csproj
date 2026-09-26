@@ -6,7 +6,7 @@
     <TargetFramework>net6.0</TargetFramework>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
-    <AssemblyName>HRTestBase</AssemblyName>
+    <AssemblyName>HRTestLib</AssemblyName>
     <Version>1.0.0</Version>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <GenerateDependencyFile>false</GenerateDependencyFile>
@@ -16,7 +16,7 @@
     <GameDir Condition="'$(GameDir)' == ''">$(MELONLOADER_GAME_DIR)</GameDir>
     <MLDir>$(GameDir)\MelonLoader\net6</MLDir>
     <InteropDir>$(GameDir)\MelonLoader\Il2CppAssemblies</InteropDir>
-    <DeployFolder>Mods</DeployFolder>
+    <DeployFolder>UserLibs</DeployFolder>
     <DeployToGame Condition="'$(DeployToGame)' == ''">true</DeployToGame>
   </PropertyGroup>
   <ItemGroup>
@@ -26,7 +26,6 @@
     <Reference Include="Il2Cppmscorlib"><HintPath>$(InteropDir)\Il2Cppmscorlib.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.CoreModule"><HintPath>$(InteropDir)\UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.UI"><HintPath>$(InteropDir)\UnityEngine.UI.dll</HintPath><Private>false</Private></Reference>
-    <ProjectReference Include="..\HRTestLib\HRTestLib.csproj" Private="false" />
   </ItemGroup>
 
   <Target Name="DeployToGame" AfterTargets="Build" Condition="'$(DeployToGame)' == 'true' And Exists('$(GameDir)\$(DeployFolder)')">
