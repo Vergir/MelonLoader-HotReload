@@ -6,13 +6,12 @@ using System.Linq;
 using HotReload;
 using MelonLoader;
 using MelonLoader.Utils;
-using UnityEngine;
 
-[assembly: MelonInfo(typeof(HotReloadMod), "HotReload", "0.2.0", "vergir")]
+[assembly: MelonInfo(typeof(HotReloadPlugin), "HotReload", "0.3.0", "vergir")]
 [assembly: MelonGame("Moon Studios", "NoRestForTheWicked")]
-// Register before every other mod so the preference-ownership hook sees their CreateCategory calls.
+// A plugin (Plugins/ folder) registers before any mod is loaded, which plugin mode and the preference hooks need.
 [assembly: MelonPriority(-10000)]
-// No [HarmonyPatch] classes; the one hook is applied by hand.
+// No [HarmonyPatch] classes; hooks are applied by hand.
 [assembly: HarmonyDontPatchAll]
 
 namespace HotReload;
@@ -21,8 +20,9 @@ namespace HotReload;
 /// Dev tool in the spirit of BepInEx AutoReload: watches Mods/ (plus optional extra paths) and hot-reloads a mod
 /// when its DLL changes. The reload key (F8 by default) reloads every changed DLL on demand.
 /// Settings live in UserData/HotReload.toml and are re-read when that file is saved.
+/// No Unity / Il2Cpp type may appear in this class's fields or signatures (see UnityApi).
 /// </summary>
-public class HotReloadMod : MelonMod
+public class HotReloadPlugin : MelonPlugin
 {
     private const string ConfigFileName = "HotReload.toml";
     private const string OldFileSuffix = ".hotreload-old";
@@ -33,9 +33,12 @@ public class HotReloadMod : MelonMod
     private MelonPreferences_Entry<string[]> _extraWatchPaths = null!;
     private MelonPreferences_Entry<string[]> _ignore = null!;
     private MelonPreferences_Entry<int> _debounceMs = null!;
+    private MelonPreferences_Entry<bool> _shadowCopy = null!;
+    private MelonPreferences_Entry<bool> _replayScenes = null!;
+    private MelonPreferences_Entry<bool> _reloadDependents = null!;
 
     private Reloader _reloader = null!;
-    private KeyCode _key = KeyCode.F8;
+    private int _key = UnityApi.NoKey; // UnityEngine.KeyCode as int
     private readonly List<FileSystemWatcher> _watchers = new List<FileSystemWatcher>();
     // Written by watcher threads, drained on the main thread: full path -> time of the last event.
     private readonly ConcurrentDictionary<string, DateTime> _pending = new ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
@@ -47,11 +50,27 @@ public class HotReloadMod : MelonMod
 
     public override void OnEarlyInitializeMelon()
     {
-        // Must happen before other mods' OnInitializeMelon, which is why this runs here and HotReload has the lowest priority.
+        // Runs while plugins register, before MelonLoader loads any mod.
+        CreatePreferences();
         PrefOwnership.Install(HarmonyInstance, LoggerInstance);
+        StartupLoader.InstallLocationPatch(HarmonyInstance, LoggerInstance);
+        if (_shadowCopy.Value) StartupLoader.InstallShadowMods(LoggerInstance);
     }
 
     public override void OnInitializeMelon()
+    {
+        // Runs at application start: every mod is loaded by now and Unity types are usable.
+        WatchConfigFile();
+        _reloader = new Reloader(LoggerInstance, typeof(HotReloadPlugin).Assembly.GetName().Name!, IsIgnored,
+            replayScenes: () => _replayScenes.Value, reloadDependents: () => _reloadDependents.Value);
+        CleanupOldFiles();
+        StartupLoader.FixAllLocations();
+        ApplyConfig();
+        _reloader.Snapshot(WatchedFiles());
+        if (_shadowCopy.Value) LoggerInstance.Msg(StartupLoader.Describe());
+    }
+
+    private void CreatePreferences()
     {
         _cat = MelonPreferences.CreateCategory("HotReload", "Hot Reload");
         _cat.SetFilePath(Path.Combine(MelonEnvironment.UserDataDirectory, ConfigFileName), autoload: true, printmsg: false);
@@ -65,13 +84,13 @@ public class HotReloadMod : MelonMod
             description: "Assembly names (file name without .dll) that are never reloaded.");
         _debounceMs = _cat.CreateEntry("DebounceMs", 500,
             description: "Wait this long after the last file change before reloading, so a build finishes writing first.");
+        _shadowCopy = _cat.CreateEntry("ShadowCopyMods", true,
+            description: "Load Mods/*.dll from copies in UserData/HotReload/Shadow so builds can overwrite the originals while the game runs. Restart to apply.");
+        _replayScenes = _cat.CreateEntry("ReplaySceneEvents", true,
+            description: "After a reload, call the mod's OnSceneWasLoaded/OnSceneWasInitialized for the scenes that are already open.");
+        _reloadDependents = _cat.CreateEntry("ReloadDependents", true,
+            description: "When a mod reloads, also reload the loaded mods that reference it, so they call its new build.");
         _cat.SaveToFile(false); // writes the file with defaults and descriptions on first run
-
-        WatchConfigFile();
-        _reloader = new Reloader(LoggerInstance, typeof(HotReloadMod).Assembly.GetName().Name!);
-        CleanupOldFiles();
-        ApplyConfig();
-        _reloader.Snapshot(WatchedFiles());
     }
 
     public override void OnPreferencesLoaded(string filepath)
@@ -91,16 +110,16 @@ public class HotReloadMod : MelonMod
             catch (Exception e) { LoggerInstance.Warning("Could not re-read " + ConfigFileName + ": " + e.Message); }
         }
         if (_configDirty) { _configDirty = false; ApplyConfig(); }
-        if (_watcherFailed) { _watcherFailed = false; LoggerInstance.Warning("File watcher overflowed or failed; restarting it. Press " + _key + " if a change was missed."); ApplyConfig(force: true); }
+        if (_watcherFailed) { _watcherFailed = false; LoggerInstance.Warning("File watcher overflowed or failed; restarting it. Press " + UnityApi.KeyName(_key) + " if a change was missed."); ApplyConfig(force: true); }
 
-        if (_key != KeyCode.None && Input.GetKeyDown(_key))
+        if (UnityApi.KeyDown(_key))
         {
-            LoggerInstance.Msg(_key + ": checking watched DLLs");
+            LoggerInstance.Msg(UnityApi.KeyName(_key) + ": checking watched DLLs");
             int n = 0;
             foreach (var file in WatchedFiles())
-                if (_reloader.ProcessFile(file, IsIgnored, out _) == Reloader.Result.Reloaded) n++;
+                if (_reloader.ProcessFile(file) == Reloader.Result.Reloaded) n++;
             foreach (var gone in _reloader.MissingSources())
-                if (_reloader.ProcessFile(gone, IsIgnored, out _) == Reloader.Result.Unloaded) n++;
+                if (_reloader.ProcessFile(gone) == Reloader.Result.Unloaded) n++;
             if (n == 0) LoggerInstance.Msg("Nothing changed.");
         }
 
@@ -113,7 +132,7 @@ public class HotReloadMod : MelonMod
             if (!_pending.TryRemove(kv.Key, out var stamp)) continue;
             if (stamp != kv.Value) { _pending[kv.Key] = stamp; continue; } // a newer event arrived meanwhile
 
-            if (_reloader.ProcessFile(kv.Key, IsIgnored, out _) == Reloader.Result.NotReady)
+            if (_reloader.ProcessFile(kv.Key) == Reloader.Result.NotReady)
             {
                 // Still being written or unreadable: retry for a few seconds, then give up until the next change.
                 _retries.TryGetValue(kv.Key, out int r);
@@ -161,11 +180,10 @@ public class HotReloadMod : MelonMod
         _appliedConfig = signature;
 
         var keyName = (_reloadKey.Value ?? "").Trim();
-        if (keyName.Length == 0 || keyName.Equals("None", StringComparison.OrdinalIgnoreCase)) _key = KeyCode.None;
-        else if (!Enum.TryParse(keyName, true, out _key))
+        if (!UnityApi.TryParseKey(keyName, out _key))
         {
             LoggerInstance.Warning("Unknown ReloadKey '" + keyName + "', using F8.");
-            _key = KeyCode.F8;
+            UnityApi.TryParseKey("F8", out _key);
         }
 
         foreach (var w in _watchers) w.Dispose();
@@ -199,7 +217,7 @@ public class HotReloadMod : MelonMod
         }
 
         LoggerInstance.Msg("Auto reload " + (_autoReload.Value ? "on (" + string.Join(", ", WatchTargets().Select(t => Path.Combine(t.dir, t.filter))) + ")" : "off")
-                           + ", reload key " + _key + ". Config: UserData/" + ConfigFileName);
+                           + ", reload key " + UnityApi.KeyName(_key) + ". Config: UserData/" + ConfigFileName);
     }
 
     private void Queue(string fullPath)
@@ -236,10 +254,11 @@ public class HotReloadMod : MelonMod
     {
         try
         {
-            foreach (var f in Directory.EnumerateFiles(MelonEnvironment.ModsDirectory, "*" + OldFileSuffix))
-            {
-                try { File.Delete(f); } catch { /* still locked by something else; next launch */ }
-            }
+            foreach (var dir in new[] { MelonEnvironment.ModsDirectory, MelonEnvironment.PluginsDirectory })
+                foreach (var f in Directory.EnumerateFiles(dir, "*" + OldFileSuffix))
+                {
+                    try { File.Delete(f); } catch { /* still locked by something else; next launch */ }
+                }
         }
         catch (Exception e) { LoggerInstance.Warning("Cleanup of *" + OldFileSuffix + " failed: " + e.Message); }
     }

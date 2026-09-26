@@ -24,6 +24,9 @@ internal static class PrefOwnership
         "MelonLoader", "0Harmony", "System.Private.CoreLib", typeof(PrefOwnership).Assembly.GetName().Name!,
     };
 
+    private static readonly FieldInfo? ReflectiveTypeField =
+        typeof(MelonLoader.Preferences.MelonPreferences_ReflectiveCategory).GetField("SystemType", BindingFlags.Instance | BindingFlags.NonPublic);
+
     public static void Install(HarmonyLib.Harmony harmony, MelonLogger.Instance log)
     {
         // Every overload plus the constructor: MelonLoader calls CreateCategory for its own categories before any mod loads,
@@ -98,6 +101,17 @@ internal static class PrefOwnership
             catch (Exception e) { log.Warning("Saving preferences of " + id + " failed: " + e.Message); }
             released.Add(id + " (" + cat.Entries.Count + ")");
             cat.Entries.Clear();
+        }
+        // Reflective categories (CreateCategory<T>) are never looked up again: MelonLoader constructs a new one on every
+        // call, so the old one (typed with the old build's T) would fight the new one over the same file section.
+        foreach (var rc in MelonPreferences.ReflectiveCategories.ToList())
+        {
+            var type = ReflectiveTypeField?.GetValue(rc) as Type;
+            if (type == null || !string.Equals(type.Assembly.GetName().Name, assemblyName, StringComparison.OrdinalIgnoreCase)) continue;
+            try { rc.SaveToFile(false); }
+            catch (Exception e) { log.Warning("Saving preferences of " + rc.Identifier + " failed: " + e.Message); }
+            MelonPreferences.ReflectiveCategories.Remove(rc);
+            released.Add(rc.Identifier + " (reflective)");
         }
         if (released.Count > 0) log.Msg("Released preference entries of " + string.Join(", ", released));
     }

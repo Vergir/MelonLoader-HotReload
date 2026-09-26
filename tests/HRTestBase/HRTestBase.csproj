@@ -1,44 +1,29 @@
 <Project Sdk="Microsoft.NET.Sdk">
-
+  <!-- Test fixture for HotReload, not a real mod. Build: dotnet build -c Release (deploys to <game>/Mods). -->
   <PropertyGroup>
     <TargetFramework>net6.0</TargetFramework>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
-    <ImplicitUsings>disable</ImplicitUsings>
-    <AssemblyName>HotReload</AssemblyName>
-    <RootNamespace>HotReload</RootNamespace>
-    <Version>0.3.0</Version>
+    <AssemblyName>HRTestBase</AssemblyName>
+    <Version>1.0.0</Version>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <GenerateDependencyFile>false</GenerateDependencyFile>
     <DebugType>portable</DebugType>
     <GameDir Condition="'$(GameDir)' == ''">C:\Games\Steam\steamapps\common\NoRestForTheWicked</GameDir>
     <MLDir>$(GameDir)\MelonLoader\net6</MLDir>
     <InteropDir>$(GameDir)\MelonLoader\Il2CppAssemblies</InteropDir>
-    <!-- HotReload is a MelonLoader plugin: it must register before mods are loaded. -->
-    <DeployFolder>Plugins</DeployFolder>
+    <DeployFolder>Mods</DeployFolder>
     <DeployToGame Condition="'$(DeployToGame)' == ''">true</DeployToGame>
   </PropertyGroup>
-
-  <ItemGroup>
-    <!-- tests/ and checker/ are separate projects -->
-    <Compile Remove="tests/**;checker/**" />
-    <None Remove="tests/**;checker/**" />
-  </ItemGroup>
-
   <ItemGroup>
     <Reference Include="MelonLoader"><HintPath>$(MLDir)\MelonLoader.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="0Harmony"><HintPath>$(MLDir)\0Harmony.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Il2CppInterop.Runtime"><HintPath>$(MLDir)\Il2CppInterop.Runtime.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Il2Cppmscorlib"><HintPath>$(InteropDir)\Il2Cppmscorlib.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.CoreModule"><HintPath>$(InteropDir)\UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
-    <Reference Include="UnityEngine.InputLegacyModule"><HintPath>$(InteropDir)\UnityEngine.InputLegacyModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.UI"><HintPath>$(InteropDir)\UnityEngine.UI.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
 
-  <!--
-    Deploy to <game>/$(DeployFolder) (Mods for a mod). A running game keeps the DLL it loaded at startup open: Windows refuses to overwrite it but
-    allows renaming it. So an existing copy is moved aside to *.hotreload-old (HotReload deletes those on the next launch)
-    and the new build is copied in, where HotReload picks it up. Mods need this only with ShadowCopyMods = false; otherwise a plain copy into Mods works.
-  -->
   <Target Name="DeployToGame" AfterTargets="Build" Condition="'$(DeployToGame)' == 'true' And Exists('$(GameDir)\$(DeployFolder)')">
     <PropertyGroup>
       <_DeployStamp>$([System.DateTime]::UtcNow.Ticks)</_DeployStamp>
