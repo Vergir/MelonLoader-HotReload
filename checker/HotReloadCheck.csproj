@@ -8,7 +8,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>HotReloadCheck</AssemblyName>
     <RootNamespace>HotReloadCheck</RootNamespace>
-    <Version>0.1.0</Version>
+    <!-- Same version as HotReload: a report says which HotReload it checks against. -->
+    <Version>$(HotReloadVersion)</Version>
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 </Project>

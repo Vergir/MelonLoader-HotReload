@@ -16,6 +16,8 @@
     <MLDir>$(MonoGameDir)\MelonLoader\net35</MLDir>
     <DeployFolder>Mods</DeployFolder>
     <DeployToGame Condition="'$(DeployToGame)' == ''">true</DeployToGame>
+    <!-- -p:HRTestThrow=true builds a version whose OnEarlyInitializeMelon throws, so MelonLoader does not register it (failed-reload recovery test). -->
+    <DefineConstants Condition="'$(HRTestThrow)' == 'true'">$(DefineConstants);HRTEST_THROW</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\..\HRTestBase\*.cs" />

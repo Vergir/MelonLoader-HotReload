@@ -7,8 +7,8 @@
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-$version = ([xml](Get-Content HotReload.csproj)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
-if (-not $version) { throw "No <Version> in HotReload.csproj" }
+$version = ([xml](Get-Content Directory.Build.props)).Project.PropertyGroup.HotReloadVersion | Where-Object { $_ } | Select-Object -First 1
+if (-not $version) { throw "No <HotReloadVersion> in Directory.Build.props" }
 
 $dist = Join-Path $PSScriptRoot "dist"
 if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }

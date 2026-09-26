@@ -8,7 +8,7 @@ using HotReload;
 using MelonLoader;
 using MelonLoader.Utils;
 
-[assembly: MelonInfo(typeof(HotReloadPlugin), "HotReload", "0.8.0", "vergir")]
+[assembly: MelonInfo(typeof(HotReloadPlugin), "HotReload", VersionInfo.Version, "vergir", VersionInfo.DownloadLink)]
 // One DLL for every Unity game, Mono or IL2CPP: net472, compiled against MelonLoader's net35 assemblies, with the runtime
 // differences decided at runtime (Compat.IsMono). Every API it binds to exists since MelonLoader 0.6.0; shadow-copying
 // Mods/ needs 0.7.1+.
@@ -19,6 +19,7 @@ using MelonLoader.Utils;
 [assembly: MelonPriority(-10000)]
 // No [HarmonyPatch] classes; hooks are applied by hand.
 [assembly: HarmonyDontPatchAll]
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("HotReload.Tests")]
 
 namespace HotReload;
 
@@ -98,7 +99,7 @@ public class HotReloadPlugin : MelonPlugin
             description: "Key that reloads every mod whose DLL changed since it was loaded. UnityEngine.KeyCode name (F8, F9, Insert, ...); \"None\" disables it.");
         _extraWatchPaths = _cat.CreateEntry("ExtraWatchPaths", Array.Empty<string>(),
             description: "Extra folders (every *.dll inside) or single DLL files to watch besides Mods/, e.g. a project's bin/Release folder.");
-        _ignore = _cat.CreateEntry("Ignore", new[] { "UnityExplorer.ML.IL2CPP.CoreCLR" },
+        _ignore = _cat.CreateEntry("Ignore", Array.Empty<string>(),
             description: "Assembly names (file name without .dll) that are never reloaded.");
         _debounceMs = _cat.CreateEntry("DebounceMs", 500,
             description: "Wait this long after the last file change before reloading, so a build finishes writing first.");
@@ -143,7 +144,7 @@ public class HotReloadPlugin : MelonPlugin
             LoggerInstance.Msg(_keys.KeyName + ": checking watched DLLs");
             int n = 0;
             foreach (var file in WatchedFiles())
-                if (_reloader.ProcessFile(file) == Reloader.Result.Reloaded) n++;
+                if (_reloader.ProcessFile(file) is Reloader.Result.Reloaded or Reloader.Result.Failed) n++; // a retry that failed was still an attempt
             foreach (var gone in _reloader.MissingSources())
                 if (_reloader.ProcessFile(gone) == Reloader.Result.Unloaded) n++;
             if (n == 0) LoggerInstance.Msg("Nothing changed.");

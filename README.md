@@ -38,7 +38,7 @@ Created on first launch. Edits apply immediately, except `ShadowCopyMods`.
 | `AutoReload` | `true` | Reload as soon as a DLL changes. `false` = only the reload key. |
 | `ReloadKey` | `"F8"` | Any [`UnityEngine.KeyCode`](https://docs.unity3d.com/ScriptReference/KeyCode.html) name; `"None"` disables it. |
 | `ExtraWatchPaths` | `[]` | More folders (every `*.dll`) or DLL files to watch, e.g. a project's `bin/Release`. Relative to the game folder. |
-| `Ignore` | `["UnityExplorer.ML.IL2CPP.CoreCLR"]` | Assembly names never reloaded. |
+| `Ignore` | `[]` | Assembly names never reloaded. |
 | `DebounceMs` | `500` | Quiet time after the last file event before reloading. |
 | `ShadowCopyMods` | `true` | MelonLoader loads `Mods/*.dll` from copies in `UserData/HotReload/Shadow`, so the originals are never locked. Restart to apply. |
 | `ReplaySceneEvents` | `true` | After a reload, call the mod's `OnSceneWasLoaded` / `OnSceneWasInitialized` for scenes already open. |
@@ -58,8 +58,9 @@ The group goes down dependents-first and comes up libraries-first, so every mod 
 0. The old build's state is saved if it opts in (see "State handoff").
 1. `MelonAssembly.UnregisterMelons`: the mod's `OnDeinitializeMelon` runs, MelonLoader callbacks are unsubscribed, and its
    `HarmonyInstance` is unpatched.
-2. Every remaining Harmony patch whose patch method lives in the old assembly is removed, whatever Harmony instance made it.
-   Objects the old build kept across scenes and live instances of its injected Il2Cpp classes are destroyed, the old build
+2. Every remaining Harmony patch whose patch method lives in the old assembly is removed, whatever Harmony instance made it,
+   and so is every MelonLoader event handler it declares (`MelonEvents.OnUpdate.Subscribe(...)` made by hand, or the
+   callbacks of a build that failed to register). Objects the old build kept across scenes and live instances of its injected Il2Cpp classes are destroyed, the old build
    is retired (next section), and its injected class names are released so the new build can inject them again.
 3. The mod's preference categories are saved and released, so the new build can create them again with the saved values.
    They are found through the old build's own fields (the categories and entries it keeps), reflective `CreateCategory<T>`
@@ -72,6 +73,13 @@ The group goes down dependents-first and comes up libraries-first, so every mod 
    `OnApplicationStarted`. A plugin's earlier hooks (`OnPreInitialization`, `OnApplicationEarlyStart`, `OnPreModsLoaded`)
    belong to game startup and are not re-run.
 6. Saved state is handed to the new build, and scene callbacks are replayed for the scenes already open.
+
+**When a reload fails** (the new build does not load, or a melon fails to register because its `OnEarlyInitializeMelon`
+throws), HotReload names what is not running: `Not running after the failed reload: X`. Copy a fixed build, or press the
+reload key to retry the same one. MelonLoader leaves the callbacks of a melon that failed to register subscribed; HotReload
+removes them, so the broken build does not keep running `OnUpdate`. State the last working build saved is kept for the
+next working build. An exception in `OnInitializeMelon` does not count as a failure: MelonLoader logs it and keeps the
+melon running.
 
 ## State handoff
 
@@ -98,6 +106,12 @@ every such entry point of the old build with a prefix that skips the body and re
 Stale behaviour stops instead of running old code against state that is gone. A leftover settings row or button does
 nothing until the game rebuilds that UI (reopen the screen). Typical mods have 0-15 such methods; large UI mods a few hundred.
 Retiring is skipped, with a log line, if a mod that references the old build is not being reloaded with it.
+
+If Harmony cannot compile the skip-prefix version of a method, HotReload replaces the method's whole body with "return
+the default value" instead. If that fails too and the runtime cannot compile the original method either, the method can
+never run in this game and is skipped ("cannot run in this game"); this happens with mods built against another game's
+interop assemblies, such as UniverseLib's `EnumerateCppHashTable` in No Rest for the Wicked. Only a method that runs but
+cannot be patched is reported as failed; that one old method would still run if something calls it.
 
 Objects the old build passed to `DontDestroyOnLoad` (UI roots, canvases, EventSystems) are destroyed. HotReload learns
 the owner from the managed call stack when `DontDestroyOnLoad` is called; the game itself calls it natively, so only mods are tracked.

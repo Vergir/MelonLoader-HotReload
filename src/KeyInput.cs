@@ -142,10 +142,7 @@ internal sealed class KeyInput
         var keyType = keyboard.Assembly.GetType("UnityEngine.InputSystem.Key");
         if (keyType == null) return "UnityEngine.InputSystem.Key not found";
 
-        var name = _keyName;
-        if (name.StartsWith("Alpha", StringComparison.OrdinalIgnoreCase) && name.Length == 6) name = "Digit" + name[5];
-        else if (name.StartsWith("Keypad", StringComparison.OrdinalIgnoreCase) && name.Length == 7 && char.IsDigit(name[6])) name = "Numpad" + name[6];
-        else if (KeyCodeToInputSystem.TryGetValue(name, out var mapped)) name = mapped;
+        var name = InputSystemKeyName(_keyName);
         try { _inputSystemKey = Enum.Parse(keyType, name, ignoreCase: true); }
         catch { return "no Input System key for '" + _keyName + "'"; }
 
@@ -153,6 +150,15 @@ internal sealed class KeyInput
         _keyboardItem = keyboard.GetProperty("Item", new[] { keyType });
         _wasPressed = null;
         return _keyboardCurrent == null || _keyboardItem == null ? "Keyboard.current / Keyboard[Key] not found" : null;
+    }
+
+    /// <summary>The Input System <c>Key</c> name for a <c>KeyCode</c> name (most are the same).</summary>
+    internal static string InputSystemKeyName(string keyCode)
+    {
+        var name = keyCode.Trim();
+        if (name.StartsWith("Alpha", StringComparison.OrdinalIgnoreCase) && name.Length == 6 && char.IsDigit(name[5])) return "Digit" + name[5];
+        if (name.StartsWith("Keypad", StringComparison.OrdinalIgnoreCase) && name.Length == 7 && char.IsDigit(name[6])) return "Numpad" + name[6];
+        return KeyCodeToInputSystem.TryGetValue(name, out var mapped) ? mapped : name;
     }
 
     private bool InputSystemDown()
@@ -186,14 +192,21 @@ internal sealed class KeyInput
     private string? TrySetupWindows()
     {
         if (!Compat.IsWindows) return "not on Windows";
-        var n = _keyName;
-        if (VirtualKeys.TryGetValue(n, out _vk)) { }
-        else if (n.Length == 1 && char.IsLetter(n[0])) _vk = char.ToUpperInvariant(n[0]);
-        else if (n.StartsWith("Alpha", StringComparison.OrdinalIgnoreCase) && n.Length == 6 && char.IsDigit(n[5])) _vk = n[5];
-        else if (n.StartsWith("Keypad", StringComparison.OrdinalIgnoreCase) && n.Length == 7 && char.IsDigit(n[6])) _vk = 0x60 + (n[6] - '0');
-        else if (n.Length >= 2 && (n[0] == 'F' || n[0] == 'f') && int.TryParse(n.Substring(1), out var f) && f is >= 1 and <= 24) _vk = 0x70 + f - 1;
-        else return "no virtual-key code for '" + _keyName + "'";
+        if (VirtualKey(_keyName) is not { } vk) return "no virtual-key code for '" + _keyName + "'";
+        _vk = vk;
         _vkWasDown = true; // ignore a key already held when switching
+        return null;
+    }
+
+    /// <summary>The Windows virtual-key code for a <c>KeyCode</c> name, or null when there is none.</summary>
+    internal static int? VirtualKey(string keyCode)
+    {
+        var n = keyCode.Trim();
+        if (VirtualKeys.TryGetValue(n, out var vk)) return vk;
+        if (n.Length == 1 && char.IsLetter(n[0])) return char.ToUpperInvariant(n[0]);
+        if (n.StartsWith("Alpha", StringComparison.OrdinalIgnoreCase) && n.Length == 6 && char.IsDigit(n[5])) return n[5];
+        if (n.StartsWith("Keypad", StringComparison.OrdinalIgnoreCase) && n.Length == 7 && char.IsDigit(n[6])) return 0x60 + (n[6] - '0');
+        if (n.Length >= 2 && (n[0] == 'F' || n[0] == 'f') && int.TryParse(n.Substring(1), out var f) && f is >= 1 and <= 24) return 0x70 + f - 1;
         return null;
     }
 

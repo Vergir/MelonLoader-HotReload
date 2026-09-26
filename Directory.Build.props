@@ -1,0 +1,11 @@
+<Project>
+  <!--
+    The one place for HotReload's version and home. HotReload.csproj turns these into VersionInfo (MelonInfo version and
+    download link), HotReloadCheck reports the version it checks against, and package.ps1 reads it for the release.
+    Test fixtures keep their own <Version>.
+  -->
+  <PropertyGroup>
+    <HotReloadVersion>0.9.0</HotReloadVersion>
+    <HotReloadRepository>https://github.com/Vergir/MelonLoader_HotReload</HotReloadRepository>
+  </PropertyGroup>
+</Project>

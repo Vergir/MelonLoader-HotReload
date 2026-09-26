@@ -17,7 +17,7 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <AssemblyName>HotReload</AssemblyName>
     <RootNamespace>HotReload</RootNamespace>
-    <Version>0.8.0</Version>
+    <Version>$(HotReloadVersion)</Version>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <GenerateDependencyFile>false</GenerateDependencyFile>
     <DebugType>portable</DebugType>
@@ -48,6 +48,23 @@
     <Reference Include="0Harmony"><HintPath>$(NuGetPackageRoot)harmonyx\$(HarmonyXVersion)\lib\net35\0Harmony.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Mono.Cecil"><HintPath>$(NuGetPackageRoot)mono.cecil\$(CecilVersion)\lib\net40\Mono.Cecil.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
+
+  <!-- VersionInfo.Version / DownloadLink for [MelonInfo], generated from Directory.Build.props. -->
+  <ItemGroup>
+    <Compile Include="$(IntermediateOutputPath)BuildInfo.g.cs" />
+  </ItemGroup>
+  <Target Name="GenerateBuildInfo" BeforeTargets="CoreCompile">
+    <ItemGroup>
+      <_BuildInfoLine Include="// &lt;auto-generated/&gt; from Directory.Build.props" />
+      <_BuildInfoLine Include="namespace HotReload%3B" />
+      <_BuildInfoLine Include="internal static class VersionInfo" />
+      <_BuildInfoLine Include="{" />
+      <_BuildInfoLine Include="    public const string Version = &quot;$(Version)&quot;%3B" />
+      <_BuildInfoLine Include="    public const string DownloadLink = &quot;$(HotReloadRepository)/releases/latest&quot;%3B" />
+      <_BuildInfoLine Include="}" />
+    </ItemGroup>
+    <WriteLinesToFile File="$(IntermediateOutputPath)BuildInfo.g.cs" Lines="@(_BuildInfoLine)" Overwrite="true" WriteOnlyWhenDifferent="true" />
+  </Target>
 
   <!-- Every configured game; the deploy target runs once per game (target batching). -->
   <ItemGroup Condition="'$(DeployToGame)' == 'true'">

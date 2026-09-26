@@ -18,6 +18,8 @@
     <InteropDir>$(GameDir)\MelonLoader\Il2CppAssemblies</InteropDir>
     <DeployFolder>Mods</DeployFolder>
     <DeployToGame Condition="'$(DeployToGame)' == ''">true</DeployToGame>
+    <!-- -p:HRTestThrow=true builds a version whose OnEarlyInitializeMelon throws, so MelonLoader does not register it (failed-reload recovery test). -->
+    <DefineConstants Condition="'$(HRTestThrow)' == 'true'">$(DefineConstants);HRTEST_THROW</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="MelonLoader"><HintPath>$(MLDir)\MelonLoader.dll</HintPath><Private>false</Private></Reference>

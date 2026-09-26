@@ -47,6 +47,10 @@ internal sealed class Reloader
     private readonly Dictionary<string, string> _hash = new(StringComparer.OrdinalIgnoreCase);   // assembly name -> SHA256 of the loaded bytes
     private readonly Dictionary<string, string> _source = new(StringComparer.OrdinalIgnoreCase); // assembly name -> file it was loaded from
     private readonly HashSet<string> _warnedOnce = new(StringComparer.OrdinalIgnoreCase);
+    // Libraries a failed reload took down: no longer loaded, so IsLibrary cannot tell, but their file must still reload.
+    private readonly HashSet<string> _downLibraries = new(StringComparer.OrdinalIgnoreCase);
+    // State the last working build handed over, kept while a mod is down so the next working build still gets it.
+    private readonly Dictionary<string, Dictionary<string, object?>> _carriedState = new(StringComparer.OrdinalIgnoreCase);
     private int _generation;
 
     public Reloader(MelonLogger.Instance log, string selfName, Func<string, bool> isIgnored, Func<bool> replayScenes, Func<bool> reloadDependents,
@@ -107,7 +111,7 @@ internal sealed class Reloader
             return Result.Skipped;
         }
         if (_isIgnored(name)) return Result.Skipped;
-        if (!isMelon && !IsLibrary(name))
+        if (!isMelon && !IsLibrary(name) && !_downLibraries.Contains(name))
         {
             _hash[name] = hash;
             if (_warnedOnce.Add(name)) _log.Msg(System.IO.Path.GetFileName(path) + " has no [MelonInfo] and is not a loaded library; ignored.");
@@ -130,6 +134,10 @@ internal sealed class Reloader
             if (_freshLibraries() && !item.IsLibrary)
                 foreach (var lib in StatefulLibrariesUsedBy(item.Name))
                     TryAdd(lib, "library used by " + item.Name, isLibrary: true);
+            // A library an earlier failed reload took down comes back with the first mod that uses it.
+            if (_downLibraries.Count > 0 && !item.IsLibrary)
+                foreach (var lib in AssemblyMeta.ReferencedNames(item.Bytes).Where(_downLibraries.Contains).ToList())
+                    TryAdd(lib, "library down since a failed reload", isLibrary: true);
             if (_reloadDependents())
                 foreach (var dep in DependentsOf(item.Name))
                     TryAdd(dep, (item.IsLibrary ? "uses " : "references ") + item.Name, isLibrary: IsLibrary(dep));
@@ -151,26 +159,15 @@ internal sealed class Reloader
     }
 
     /// <summary>Referenced assemblies first, so every assembly is loaded after the ones it binds to.</summary>
-    private static List<Item> TopologicalOrder(List<Item> items)
-    {
-        var names = new HashSet<string>(items.Select(i => i.Name), StringComparer.OrdinalIgnoreCase);
-        var refs = items.ToDictionary(i => i.Name, i => AssemblyMeta.ReferencedNames(i.Bytes).Where(names.Contains).ToHashSet(StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase);
-        var ordered = new List<Item>();
-        var placed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        while (ordered.Count < items.Count)
-        {
-            var next = items.FirstOrDefault(i => !placed.Contains(i.Name) && refs[i.Name].All(r => placed.Contains(r) || r == i.Name))
-                       ?? items.First(i => !placed.Contains(i.Name)); // cycle: take any
-            ordered.Add(next);
-            placed.Add(next.Name);
-        }
-        return ordered;
-    }
+    private static List<Item> TopologicalOrder(List<Item> items) =>
+        LoadOrdering.Order(items, i => i.Name, i => AssemblyMeta.ReferencedNames(i.Bytes));
 
     private bool ReloadGroup(List<Item> group)
     {
         var sw = Stopwatch.StartNew();
-        foreach (var it in group) _hash[it.Name] = it.Hash; // even on failure: do not retry the same broken bytes on every event
+        // Remembered before trying, so file events for the same bytes do not retry; ReportDown forgets the hashes of
+        // whatever ends up not running, so the reload key can retry those.
+        foreach (var it in group) _hash[it.Name] = it.Hash;
         if (group.Count > 1)
             _log.Msg("Reloading together: " + string.Join(", ", group.Select(i => i.Name + " (" + i.Reason + ")")));
         try
@@ -184,7 +181,10 @@ internal sealed class Reloader
                 it.OldMelons = it.OldLoaded.SelectMany(a => a.LoadedMelons).ToList();
                 it.OldVersion = it.OldMelons.FirstOrDefault()?.Info.Version ?? it.OldLoaded.FirstOrDefault()?.Assembly.GetName().Version?.ToString();
                 it.PatchedBefore = CountMethodsPatchedFrom(it.OldAssemblies);
-                it.SavedState = StateHandoff.Save(it.OldMelons, _log);
+                // Only a registered (running) build has state worth handing over; a build that failed to register
+                // passes on what the last working build saved.
+                it.SavedState = StateHandoff.Save(it.OldMelons.Where(m => m.Registered), _log);
+                if (it.SavedState.Count == 0 && _carriedState.TryGetValue(it.Name, out var carried)) it.SavedState = carried;
                 foreach (var old in it.OldLoaded)
                 {
                     old.UnregisterMelons("HotReload", silent: true);
@@ -193,6 +193,7 @@ internal sealed class Reloader
             }
             var groupNames = new HashSet<string>(group.Select(i => i.Name), StringComparer.OrdinalIgnoreCase);
             foreach (var it in group) RemoveRemainingPatches(it.Name, it.OldAssemblies);
+            foreach (var it in group) RemoveEventSubscriptions(it.Name, it.OldAssemblies);
             foreach (var it in group) RetireOldBuild(it.Name, it.OldAssemblies, groupNames);
             foreach (var it in group) PrefOwnership.ReleaseCategories(it.Name, it.OldAssemblies, it.OldMelons, _log);
 
@@ -200,13 +201,40 @@ internal sealed class Reloader
             bool allOk = true;
             foreach (var it in group) allOk &= BringUp(it);
             if (group.Count > 1) _log.Msg("Group reloaded in " + sw.ElapsedMilliseconds + " ms.");
-            return allOk;
+            return ReportDown(group) && allOk;
         }
         catch (Exception e)
         {
             _log.Error("Reload of " + string.Join(", ", group.Select(i => i.Name)) + " failed: " + e);
+            ReportDown(group);
             return false;
         }
+    }
+
+    /// <summary>
+    /// After a reload: which members of the group are not running (a library not loaded, a mod without a registered
+    /// melon). Their hashes are forgotten, so the reload key or the next copy of the same file retries them instead of
+    /// reporting "nothing changed". Returns true when everything is up.
+    /// </summary>
+    private bool ReportDown(List<Item> group)
+    {
+        var down = group.Where(i => i.IsLibrary
+            ? !FindLoaded(i.Name).Any()
+            : !FindLoaded(i.Name).SelectMany(a => a.LoadedMelons).Any(m => m.Registered)).ToList();
+        foreach (var it in group)
+        {
+            if (down.Contains(it))
+            {
+                _hash.Remove(it.Name);
+                if (it.IsLibrary) _downLibraries.Add(it.Name);
+                else if (it.SavedState.Count > 0) _carriedState[it.Name] = it.SavedState;
+            }
+            else { _downLibraries.Remove(it.Name); _carriedState.Remove(it.Name); }
+        }
+        if (down.Count == 0) return true;
+        _log.Warning("Not running after the failed reload: " + string.Join(", ", down.Select(i => i.Name)) +
+                     ". Fix the build and copy it again, or press the reload key to retry.");
+        return false;
     }
 
     private bool BringUp(Item it)
@@ -235,8 +263,14 @@ internal sealed class Reloader
             if (ma.RottenMelons.Count > 0) _log.Error(it.Name + ": " + ma.RottenMelons.Count + " melon(s) failed to load (see above).");
             MelonBase.RegisterSorted(ma.LoadedMelons);
             var registeredMelons = ma.LoadedMelons.Where(m => m.Registered).ToList();
+            var failed = ma.LoadedMelons.Where(m => !m.Registered).ToList();
+            if (failed.Count > 0)
+            {
+                int zombies = MelonEventCleanup.RemoveCallbacksOf(failed, _log);
+                if (zombies > 0) _log.Msg(it.Name + ": removed " + zombies + " callback(s) MelonLoader left subscribed for the melon(s) that failed to register.");
+            }
             foreach (var melon in registeredMelons) RunMissedStartCallbacks(melon);
-            StateHandoff.Restore(registeredMelons, it.SavedState, _log);
+            int restored = StateHandoff.Restore(registeredMelons, it.SavedState, _log);
 
             int scenes = 0;
             if (_replayScenes())
@@ -250,7 +284,7 @@ internal sealed class Reloader
             int patchedAfter = CountMethodsPatchedFrom(new HashSet<Assembly> { asm });
             what += " (Harmony: " + (it.OldVersion == null ? "" : it.PatchedBefore + " method(s) unpatched, ") + patchedAfter + " patched"
                     + (scenes > 0 ? "; replayed " + scenes + " scene(s)" : "")
-                    + (it.SavedState.Count > 0 ? "; state handed over" : "") + ")";
+                    + (restored > 0 ? "; state handed over" : "") + ")";
             if (registeredMelons.Count == ma.LoadedMelons.Count && registeredMelons.Count > 0)
                 _log.Msg(what + " in " + sw.ElapsedMilliseconds + " ms (from " + ShortPath(it.Path) + ")");
             else
@@ -318,6 +352,7 @@ internal sealed class Reloader
             ForgetMelonAssembly(old);
         }
         RemoveRemainingPatches(name, oldAssemblies);
+        RemoveEventSubscriptions(name, oldAssemblies);
         RetireOldBuild(name, oldAssemblies, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { name });
         PrefOwnership.ReleaseCategories(name, oldAssemblies, oldMelons, _log);
         _hash.Remove(name);
@@ -353,8 +388,11 @@ internal sealed class Reloader
             else
                 foreach (var asm in oldAssemblies)
                 {
-                    var (retired, failed, ms) = Retirer.Retire(asm, injected.Where(t => t.Assembly == asm), _log);
-                    if (retired + failed > 0) parts.Add("retired " + retired + " old method(s)" + (failed > 0 ? " (" + failed + " failed)" : "") + " in " + ms + " ms");
+                    var (retired, replaced, unrunnable, failed, ms) = Retirer.Retire(asm, injected.Where(t => t.Assembly == asm), _log);
+                    if (retired + unrunnable + failed > 0)
+                        parts.Add("retired " + retired + " old method(s)" + (replaced > 0 ? " (" + replaced + " by replacing the body)" : "")
+                                  + (unrunnable > 0 ? " (" + unrunnable + " skipped: cannot run in this game)" : "")
+                                  + (failed > 0 ? " (" + failed + " failed)" : "") + " in " + ms + " ms");
                 }
         }
         // IL2CPP: the new build registers classes with the same names; Il2CppInterop would refuse them otherwise.
@@ -433,6 +471,13 @@ internal sealed class Reloader
         catch { return 0; }
     }
 
+    /// <summary>MelonLoader event handlers of the old build that unregistering left behind (see MelonEventCleanup).</summary>
+    private void RemoveEventSubscriptions(string name, HashSet<Assembly> oldAssemblies)
+    {
+        int n = MelonEventCleanup.Remove(oldAssemblies, _log);
+        if (n > 0) _log.Msg(name + ": removed " + n + " MelonLoader event handler(s) left by the old build.");
+    }
+
     /// <summary>
     /// Unregistering only unpatches the melon's own HarmonyInstance. Anything the old build patched through another
     /// Harmony instance (or a library patched at all) is found by the assembly of the patch method and removed here.
@@ -501,5 +546,30 @@ internal static class LoaderFolders
     {
         var dir = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path)) ?? "";
         return MelonFolders().Any(d => string.Equals(d.TrimEnd('\\', '/'), dir.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase));
+    }
+}
+
+/// <summary>Load order of a reload group. Separate from Reloader, which touches MelonLoader, so it can be tested without a game.</summary>
+internal static class LoadOrdering
+{
+    /// <summary>
+    /// Orders <paramref name="items"/> so that each comes after the items it references (by name, case-insensitive;
+    /// references outside the list are ignored). Stable for independent items; a cycle is broken by taking the first
+    /// remaining item.
+    /// </summary>
+    internal static List<T> Order<T>(IList<T> items, Func<T, string> name, Func<T, IEnumerable<string>> references) where T : class
+    {
+        var names = new HashSet<string>(items.Select(name), StringComparer.OrdinalIgnoreCase);
+        var refs = items.ToDictionary(name, i => new HashSet<string>(references(i).Where(names.Contains), StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase);
+        var ordered = new List<T>();
+        var placed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        while (ordered.Count < items.Count)
+        {
+            var next = items.FirstOrDefault(i => !placed.Contains(name(i)) && refs[name(i)].All(r => placed.Contains(r) || string.Equals(r, name(i), StringComparison.OrdinalIgnoreCase)));
+            if (next == null || placed.Contains(name(next))) next = items.First(i => !placed.Contains(name(i))); // cycle: take any
+            ordered.Add(next);
+            placed.Add(name(next));
+        }
+        return ordered;
     }
 }

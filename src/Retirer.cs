@@ -22,7 +22,7 @@ internal static class Retirer
 {
     // Created on first use: method discovery must not initialize Harmony (it also runs in the offline test harness).
     private static HarmonyLib.Harmony? _harmony;
-    private static HarmonyLib.HarmonyMethod? _skipPrefix;
+    private static HarmonyLib.HarmonyMethod? _skipPrefix, _replaceBody;
     private static readonly Dictionary<short, OpCode> OpCodesByValue = typeof(OpCodes)
         .GetFields(BindingFlags.Public | BindingFlags.Static)
         .Select(f => (OpCode)f.GetValue(null)!)
@@ -31,22 +31,66 @@ internal static class Retirer
     // Harmony: returning false skips the original; __result keeps its default (null / 0 / false).
     private static bool Skip() => false;
 
-    public static (int retired, int failed, long ms) Retire(Assembly asm, IEnumerable<Type> wholeTypes, MelonLogger.Instance log)
+    /// <summary>
+    /// Fallback transpiler: the whole body becomes "return default". A skip prefix still compiles a copy of the original
+    /// body, which fails for some methods ("IL Compile Error", seen on an iterator in UniverseLib); without the original
+    /// instructions there is nothing left to fail.
+    /// </summary>
+    private static IEnumerable<HarmonyLib.CodeInstruction> ReturnDefault(IEnumerable<HarmonyLib.CodeInstruction> instructions, ILGenerator generator, MethodBase original)
+    {
+        var type = (original as MethodInfo)?.ReturnType ?? typeof(void);
+        if (type.IsByRef) throw new NotSupportedException("returns by reference");
+        if (type == typeof(void))
+        {
+            yield return new HarmonyLib.CodeInstruction(OpCodes.Ret);
+            yield break;
+        }
+        if (!type.IsValueType)
+        {
+            yield return new HarmonyLib.CodeInstruction(OpCodes.Ldnull);
+            yield return new HarmonyLib.CodeInstruction(OpCodes.Ret);
+            yield break;
+        }
+        var local = generator.DeclareLocal(type);
+        yield return new HarmonyLib.CodeInstruction(OpCodes.Ldloca, local);
+        yield return new HarmonyLib.CodeInstruction(OpCodes.Initobj, type);
+        yield return new HarmonyLib.CodeInstruction(OpCodes.Ldloc, local);
+        yield return new HarmonyLib.CodeInstruction(OpCodes.Ret);
+    }
+
+    /// <summary>
+    /// Whether the runtime can compile <paramref name="m"/> at all. A method that references a type this game does not
+    /// have in that shape (a mod built against another game version's interop assemblies) can never run, so it needs no
+    /// retiring. Seen in UniverseLib: an iterator with a local of a struct type that this game's interop has as a class.
+    /// </summary>
+    private static bool CanCompile(MethodBase m)
+    {
+        try { System.Runtime.CompilerServices.RuntimeHelpers.PrepareMethod(m.MethodHandle); return true; }
+        catch { return false; }
+    }
+
+    public static (int retired, int replaced, int unrunnable, int failed, long ms) Retire(Assembly asm, IEnumerable<Type> wholeTypes, MelonLogger.Instance log)
     {
         var sw = Stopwatch.StartNew();
         _harmony ??= new HarmonyLib.Harmony("HotReload.retire");
         _skipPrefix ??= new HarmonyLib.HarmonyMethod(typeof(Retirer).GetMethod(nameof(Skip), BindingFlags.Static | BindingFlags.NonPublic));
-        int ok = 0, failed = 0;
+        _replaceBody ??= new HarmonyLib.HarmonyMethod(typeof(Retirer).GetMethod(nameof(ReturnDefault), BindingFlags.Static | BindingFlags.NonPublic));
+        int ok = 0, replaced = 0, unrunnable = 0, failed = 0;
         foreach (var m in ReachableMethods(asm, wholeTypes))
         {
             try { _harmony.Patch(m, prefix: _skipPrefix); ok++; }
-            catch (Exception e)
+            catch (Exception first)
             {
-                failed++;
-                if (failed <= 3) log.Warning("Could not retire " + m.DeclaringType?.FullName + "." + m.Name + ": " + e.Message);
+                try { _harmony.Patch(m, transpiler: _replaceBody); ok++; replaced++; }
+                catch (Exception e)
+                {
+                    if (!CanCompile(m)) { unrunnable++; continue; } // the original cannot run either
+                    failed++;
+                    if (failed <= 3) log.Warning("Could not retire " + m.DeclaringType?.FullName + "." + m.Name + ": " + first.Message + "; body replacement: " + e.Message);
+                }
             }
         }
-        return (ok, failed, sw.ElapsedMilliseconds);
+        return (ok, replaced, unrunnable, failed, sw.ElapsedMilliseconds);
     }
 
     /// <summary>

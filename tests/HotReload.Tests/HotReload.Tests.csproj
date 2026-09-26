@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Offline tests: no game, no MelonLoader runtime. They exercise the parts of HotReload.dll that are pure logic (names,
+    Cecil metadata and renaming, load order, the IL walk that finds retirable methods, key-name mapping) and the
+    HotReloadCheck rules. Run: dotnet test tests/HotReload.Tests
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <!-- HotReload.dll is net472; .NET 8 runs it, and the compat shims cover what the tests touch. -->
+    <NoWarn>$(NoWarn);MSB3277;NU1701</NoWarn>
+    <HotReloadDir>$(MSBuildThisFileDirectory)..\..\bin\$(Configuration)\</HotReloadDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" PrivateAssets="all" />
+    <!-- What HotReload.dll binds to; MelonLoader itself is only referenced for compiling, never run. -->
+    <PackageReference Include="Mono.Cecil" Version="0.11.6" />
+    <PackageReference Include="HarmonyX" Version="2.10.2" />
+    <PackageDownload Include="LavaGang.MelonLoader" Version="[0.7.3]" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Build HotReload first (net472, so no assembly reference through the project), then reference its output. -->
+    <ProjectReference Include="..\..\HotReload.csproj" ReferenceOutputAssembly="false" SkipGetTargetFrameworkProperties="true" Properties="DeployToGame=false" />
+    <Reference Include="HotReload"><HintPath>$(HotReloadDir)HotReload.dll</HintPath></Reference>
+    <Reference Include="MelonLoader"><HintPath>$(NuGetPackageRoot)lavagang.melonloader\0.7.3\lib\net35\MelonLoader.dll</HintPath><Private>false</Private></Reference>
+    <ProjectReference Include="..\..\checker\HotReloadCheck.csproj" />
+  </ItemGroup>
+</Project>

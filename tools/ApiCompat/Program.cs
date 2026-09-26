@@ -32,6 +32,9 @@ var reflective = new[] {
     ("MelonLoader", "MelonLoader.Preferences.MelonPreferences_ReflectiveCategory", "SystemType"),
     ("MelonLoader", "MelonLoader.MelonPreferences_ReflectiveCategory", "SystemType"),
     ("MelonLoader", "MelonLoader.MelonAssembly", "set_Location"),
+    ("MelonLoader", "MelonLoader.MelonEventBase`1", "GetSubscribers"),
+    ("MelonLoader", "MelonLoader.MelonEventBase`1", "Unsubscribe"),
+    ("MelonLoader", "MelonLoader.MelonEventBase`1/MelonEventSubscriber", "del"),
     // Il2CppInterop, reflection only since the universal DLL (IL2CPP games; absent in net35 dirs)
     ("Il2CppInterop.Runtime", "Il2CppInterop.Runtime.Injection.ClassInjector", "InjectedTypes"),
     ("Il2CppInterop.Runtime", "Il2CppInterop.Runtime.Injection.InjectorHelpers", "s_ClassNameLookup"),

@@ -40,9 +40,11 @@ internal static class StateHandoff
         return saved;
     }
 
-    public static void Restore(IEnumerable<MelonBase> newMelons, Dictionary<string, object?> saved, MelonLogger.Instance log)
+    /// <summary>Hands saved state to the new melons. Returns how many received it.</summary>
+    public static int Restore(IEnumerable<MelonBase> newMelons, Dictionary<string, object?> saved, MelonLogger.Instance log)
     {
-        if (saved.Count == 0) return;
+        int restored = 0;
+        if (saved.Count == 0) return 0;
         foreach (var melon in newMelons)
         {
             if (!saved.TryGetValue(melon.Info.Name, out var state)) continue;
@@ -52,8 +54,9 @@ internal static class StateHandoff
                 log.Warning(melon.Info.Name + ": the old build saved state but the new build has no OnHotReloadRestoreState(object); state dropped.");
                 continue;
             }
-            try { m.Invoke(melon, new[] { state }); }
+            try { m.Invoke(melon, new[] { state }); restored++; }
             catch (TargetInvocationException e) { log.Warning(melon.Info.Name + ": OnHotReloadRestoreState failed: " + e.InnerException?.Message); }
         }
+        return restored;
     }
 }

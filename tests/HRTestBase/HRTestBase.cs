@@ -31,6 +31,13 @@ public class HRTestBaseMod : MelonMod
 {
     public static string Greeting() => "HRTestBase build " + typeof(HRTestBaseMod).Assembly.GetName().Version;
 
+#if HRTEST_THROW
+    // Failed-reload recovery test (-p:HRTestThrow=true). MelonLoader refuses to register a melon only when
+    // OnEarlyInitializeMelon throws; an exception in OnInitializeMelon is logged and the melon keeps running.
+    public override void OnEarlyInitializeMelon() =>
+        throw new System.InvalidOperationException("HRTestBase: deliberate registration failure (built with -p:HRTestThrow=true)");
+#endif
+
     public override void OnInitializeMelon()
     {
         var cat = MelonPreferences.CreateCategory<TestConfig>("HRTestBase", "HotReload test");
