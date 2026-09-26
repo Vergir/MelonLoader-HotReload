@@ -8,10 +8,14 @@ using HotReload;
 using MelonLoader;
 using MelonLoader.Utils;
 
-[assembly: MelonInfo(typeof(HotReloadPlugin), "HotReload", "0.7.0", "vergir")]
-// No MelonGame attribute: works in any IL2CPP game. Every API it binds to exists since MelonLoader 0.6.0
-// (checked against the 0.6.0-0.7.3 release binaries); shadow-copying Mods/ needs 0.7.1+.
+[assembly: MelonInfo(typeof(HotReloadPlugin), "HotReload", "0.8.0", "vergir")]
+// No MelonGame attribute: works in any game. Two builds: IL2CPP (net6) and Mono (net472), each refused by MelonLoader in
+// the other kind of game. Every API it binds to exists since MelonLoader 0.6.0; shadow-copying Mods/ needs 0.7.1+.
+#if MONO
+[assembly: MelonPlatformDomain(MelonPlatformDomainAttribute.CompatibleDomains.MONO)]
+#else
 [assembly: MelonPlatformDomain(MelonPlatformDomainAttribute.CompatibleDomains.IL2CPP)]
+#endif
 [assembly: VerifyLoaderVersion(0, 6, 0, true)]
 // A plugin (Plugins/ folder) registers before any mod is loaded, which the shadow copy of Mods/ needs.
 [assembly: MelonPriority(-10000)]
@@ -80,9 +84,9 @@ public class HotReloadPlugin : MelonPlugin
         StartupLoader.FixAllLocations();
         ApplyConfig();
         _reloader.Snapshot(WatchedFiles());
-        LoggerInstance.Msg("MelonLoader " + LoaderVersion() + ", .NET " + Environment.Version + ". Shadow copy: " + _shadowStatus
+        LoggerInstance.Msg("MelonLoader " + LoaderVersion() + ", " + Compat.RuntimeDescription() + (Compat.IsMono ? " (Mono build)" : "") + ". Shadow copy: " + _shadowStatus
                            + "; Assembly.Location patch: " + (_locationPatched ? "on" : "off")
-                           + "; DontDestroyOnLoad tracking: " + (ddol ? "on" : "off") + "; class re-injection: " + (InjectedTypes.Supported ? "on" : "off") + "; reload key: " + _keys.Describe() + ".");
+                           + "; DontDestroyOnLoad tracking: " + (ddol ? "on" : "off") + ReinjectionStatus() + "; reload key: " + _keys.Describe() + ".");
         if (_shadowCopy.Value) LoggerInstance.Msg(StartupLoader.Describe());
     }
 
@@ -292,4 +296,10 @@ public class HotReloadPlugin : MelonPlugin
                     ?? info?.GetField("Version", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
         return v?.ToString() ?? typeof(MelonAssembly).Assembly.GetName().Version?.ToString() ?? "?";
     }
+
+#if MONO
+    private static string ReinjectionStatus() => "";
+#else
+    private static string ReinjectionStatus() => "; class re-injection: " + (InjectedTypes.Supported ? "on" : "off");
+#endif
 }

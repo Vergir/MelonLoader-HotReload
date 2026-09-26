@@ -1,14 +1,14 @@
 # HotReload
 
 MelonLoader plugin for mod authors: rebuild a mod and the running game picks it up without a relaunch, like
-[AutoReload](https://github.com/Hamunii/AutoReload) does for BepInEx 5. Works in any IL2CPP Unity game.
+[AutoReload](https://github.com/Hamunii/AutoReload) does for BepInEx 5. Works in any Unity game, IL2CPP or Mono.
 
 | | |
 |---|---|
-| Games | IL2CPP only. MelonLoader refuses to load it in Mono games, where it would not work. |
+| Games | IL2CPP and Mono, as two builds of the same source: `HotReload.dll` for IL2CPP (.NET 6) and the Mono build (`mono/`, .NET Framework 4.7.2 API). MelonLoader refuses each build in the other kind of game. |
 | MelonLoader | 0.6.0 or newer. Every API it uses exists in the 0.6.0-0.7.3 release binaries. Shadow-copying `Mods/` needs 0.7.1+; on older versions mod DLLs stay locked and builds need the rename-then-copy deploy step below. |
-| Tested in-game | MelonLoader 0.7.3 in No Rest for the Wicked (Unity 6000.1, .NET 6.0.16), 2026-09-26: own test mods, MoreAspectRatios, NRftW Item Manager, UnityExplorer 4.13.2 with UniverseLib. |
-| Not supported | Mono games. They need a separate build (older .NET, no `AssemblyLoadContext`, and Mono binds a reloaded mod's references to the first-loaded copy of a library, so libraries would need renaming per reload). |
+| Tested in-game (IL2CPP) | MelonLoader 0.7.3 in No Rest for the Wicked (Unity 6000.1, .NET 6.0.16), 2026-09-26: own test mods, MoreAspectRatios, NRftW Item Manager, UnityExplorer 4.13.2 with UniverseLib. |
+| Tested in-game (Mono) | MelonLoader 0.7.3 in PEAK (Unity 6000.3, Mono 6.13), 2026-09-26: own test mods (library, Mods subfolder, plugin, MonoBehaviour, state handoff), UnityExplorer 4.13.6 Mono with UniverseLib (reloads as far as it starts in that game). |
 
 At startup it logs what it could enable, e.g.
 `MelonLoader 0.7.3, .NET 6.0.16. Shadow copy: on; Assembly.Location patch: on; DontDestroyOnLoad tracking: on; reload key: F8 (legacy Input).`
@@ -123,8 +123,9 @@ What HotReload cannot undo, so the mod must in `OnDeinitializeMelon`:
 * **Game state the mod changed**, such as static fields: re-apply it in `OnInitializeMelon`, because the new build starts
   with fresh static state.
 
-Other limits: old assemblies stay in memory, about the DLL's size per reload. HotReload cannot reload itself. Mono
-games are not supported (see "Compatibility").
+Other limits: old assemblies stay in memory, about the DLL's size per reload. HotReload cannot reload itself. On Mono,
+each reloaded build carries a changed assembly name (`Name__hrN`, see below); code that compares its own assembly name
+to a constant sees the suffix.
 
 ## Checking existing mods: `checker/`
 
@@ -143,7 +144,7 @@ dotnet checker/bin/Release/net8.0/HotReloadCheck.dll <dll-or-folder>... --md rep
 | REVIEW | Uses something HotReload cannot clean up, but has `OnDeinitializeMelon`; check that it undoes it. |
 | NEEDS CLEANUP | Uses something HotReload cannot clean up and has no `OnDeinitializeMelon`. |
 | BLOCKED | Uses something HotReload cannot reload (no current rule produces this). |
-| UNSUPPORTED | Built for a Mono game, or for MelonLoader 0.5 (Unhollower). |
+| UNSUPPORTED | Built for MelonLoader 0.5 (Unhollower). |
 
 A static scan cannot tell whether `OnDeinitializeMelon` undoes everything, and misses behaviour hidden behind reflection or
 obfuscation. REVIEW means "read the cleanup code or try it".
@@ -169,6 +170,11 @@ build at one (MelonLoader installed and the game started once), in any of these 
 The build copies the DLL into `<game>/Plugins` (`-p:DeployToGame=false` to skip). The published DLL works in other
 IL2CPP games too: interop assemblies are bound by name at runtime.
 
+The Mono build is `mono/HotReload.Mono.csproj`. It compiles the same sources with `MONO` defined against MelonLoader's
+`net35` folder and the game's `<Game>_Data/Managed` Unity modules. Point it at a Mono game with MelonLoader through
+`MonoGameDir` (`Local.props`, `MELONLOADER_MONO_GAME_DIR`, or `-p:MonoGameDir=...`), then `dotnet build mono -c Release`.
+The test fixtures have Mono projects in `tests/mono/`.
+
 ## How it works (MelonLoader internals it relies on)
 
 MelonLoader marks its own assembly with `[PatchShield]` (every release since 0.6.0): Harmony patches on MelonLoader's
@@ -180,12 +186,13 @@ and patches only the game, the runtime and the mods.
 | HotReload is a `MelonPlugin` | It registers before MelonLoader scans `Mods/`, so the shadow copy is in place before any mod loads. No Unity type may appear in its fields; see `UnityApi.cs`. |
 | Shadow copy by editing `MelonFolderHandler._modDirs` (0.7.1+) | MelonLoader loads mods with `LoadFromAssemblyPath`, which locks the file, and PatchShield rules out redirecting that call. The folder list is plain data read later. |
 | Remove the old `MelonAssembly` from the internal `loadedAssemblies` list | `LoadMelonAssembly(path, assembly)` returns the cached entry with the same `FullName`. |
-| One `AssemblyLoadContext` per reload | The default context refuses a second assembly with the same name. |
+| One `AssemblyLoadContext` per reload (IL2CPP) | The default context refuses a second assembly with the same name. |
+| A unique assembly name per reload, via Mono.Cecil (Mono) | Mono has no load contexts and binds a reference to the first loaded assembly of a name, so a reloaded mod would keep calling the old library. Each reloaded build is renamed `Name__hrN`, its references to other reloaded assemblies are rewritten to their current names, and HotReload strips the suffix wherever it compares names. |
 | `MelonBase.RegisterSorted` | `LoadMelons` only creates melons. |
 | Preference categories found through the old build's fields | `CreateEntry` throws on duplicates. Recording who creates a category would need a hook on MelonLoader, which PatchShield blocks. |
 | Reflective categories matched by their private `SystemType` | `CreateCategory<T>` makes a new category on every call. |
 | Postfix on `RuntimeAssembly.Location` | Assemblies loaded from bytes report an empty location. |
-| Postfix on `UnityEngine.Object.DontDestroyOnLoad` | Records which mod kept an object across scenes (managed call stack; a loaded mod on the stack wins over a helper library). |
+| Postfix on `UnityEngine.Object.DontDestroyOnLoad` | Records which mod kept an object across scenes (managed call stack; only loaded mods and MelonLoader libraries count, so the game's own calls on Mono are ignored). |
 | Remove old names from `ClassInjector.InjectedTypes` and `InjectorHelpers.s_ClassNameLookup` (Il2CppInterop) | Both reject a second injected class with the same full name. |
 | Re-apply the `Assembly.Location` postfix when it stops working | The getter is precompiled runtime code; the tiered JIT can recompile it without the patch. Reloaded builds are loaded from a file copy, so their `Location` is never empty either way. |
 | Own watcher for `HotReload.toml` | MelonLoader's preferences watcher misses rename-style saves and swallows the first change after a save. |
@@ -195,5 +202,5 @@ A MelonLoader or Il2CppInterop update that renames `loadedAssemblies`, `_modDirs
 
 Source: `src/HotReloadPlugin.cs` (config, watchers), `src/Reloader.cs` (unload/load/dependents/Harmony cleanup),
 `src/StartupLoader.cs` (shadow copy, `Assembly.Location`), `src/Retirer.cs`, `src/PrefOwnership.cs`, `src/Callers.cs`,
-`src/KeyInput.cs` (reload key backends), `src/InjectedTypes.cs` (class re-injection), `src/UnityApi.cs` (Unity calls,
-`DontDestroyOnLoad` tracking, destroying old instances).
+`src/KeyInput.cs` (reload key backends), `src/InjectedTypes.cs` (class re-injection, IL2CPP), `src/UnityApi.cs` (Unity calls,
+`DontDestroyOnLoad` tracking, destroying old instances), `src/Compat.cs` (runtime differences, Cecil metadata and renaming).

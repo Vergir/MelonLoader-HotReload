@@ -2,5 +2,7 @@
   <!-- Copy to Local.props (git-ignored) and point GameDir at a game with MelonLoader installed and started once. -->
   <PropertyGroup>
     <GameDir>C:\Program Files (x86)\Steam\steamapps\common\YourGame</GameDir>
+    <!-- Only for the Mono build (mono/HotReload.Mono.csproj): a Mono Unity game with MelonLoader. -->
+    <MonoGameDir>C:\Program Files (x86)\Steam\steamapps\common\YourMonoGame</MonoGameDir>
   </PropertyGroup>
 </Project>

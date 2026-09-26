@@ -193,7 +193,7 @@ internal sealed class KeyInput
 
     private string? TrySetupWindows()
     {
-        if (!OperatingSystem.IsWindows()) return "not on Windows";
+        if (!Compat.IsWindows) return "not on Windows";
         var n = _keyName;
         if (VirtualKeys.TryGetValue(n, out _vk)) { }
         else if (n.Length == 1 && char.IsLetter(n[0])) _vk = char.ToUpperInvariant(n[0]);
@@ -219,7 +219,7 @@ internal sealed class KeyInput
         if (fg == IntPtr.Zero) return false;
         if (fg == _window) return true;
         GetWindowThreadProcessId(fg, out var pid);
-        if (pid != (uint)Environment.ProcessId) return false;
+        if (pid != (uint)Compat.ProcessId) return false;
         _window = fg;
         return true;
     }

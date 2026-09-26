@@ -4,10 +4,9 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Reflection.Metadata;
-using System.Reflection.PortableExecutable;
+#if !MONO
 using System.Runtime.Loader;
-using System.Security.Cryptography;
+#endif
 using MelonLoader;
 using MelonLoader.Utils;
 
@@ -73,9 +72,9 @@ internal sealed class Reloader
     {
         foreach (var ma in MelonAssembly.LoadedAssemblies)
         {
-            var name = ma.Assembly.GetName().Name;
-            if (name == null || string.IsNullOrEmpty(ma.Location) || !File.Exists(ma.Location)) continue;
-            if (TryRead(ma.Location, out var bytes)) _hash[name] = Sha256(bytes);
+            var name = AsmNames.Of(ma.Assembly);
+            if (name.Length == 0 || string.IsNullOrEmpty(ma.Location) || !File.Exists(ma.Location)) continue;
+            if (TryRead(ma.Location, out var bytes)) _hash[name] = Compat.Sha256Hex(bytes);
             _source[name] = System.IO.Path.GetFullPath(ma.Location);
         }
         int watched = watchedFiles.Count();
@@ -99,7 +98,7 @@ internal sealed class Reloader
         }
 
         if (!TryRead(path, out var bytes)) return Result.NotReady;
-        if (!TryInspect(bytes, out var name, out bool isMelon)) return Result.NotReady; // partially written or not .NET
+        if (!AssemblyMeta.TryInspect(bytes, out var name, out bool isMelon)) return Result.NotReady; // partially written or not .NET
 
         if (name == _selfName)
         {
@@ -108,7 +107,7 @@ internal sealed class Reloader
         }
         if (_isIgnored(name)) return Result.Skipped;
 
-        var hash = Sha256(bytes);
+        var hash = Compat.Sha256Hex(bytes);
         if (_hash.TryGetValue(name, out var known) && known == hash) return Result.Unchanged;
         if (!isMelon && !IsLibrary(name))
         {
@@ -147,7 +146,7 @@ internal sealed class Reloader
                 if (_warnedOnce.Add("unreadable:" + name)) _log.Warning(name + " (" + reason + ") cannot be read from disk; it is not reloaded with the group.");
                 return;
             }
-            var it = new Item { Name = name, Path = p, Bytes = bytes, Hash = Sha256(bytes), IsLibrary = isLibrary, Reason = reason };
+            var it = new Item { Name = name, Path = p, Bytes = bytes, Hash = Compat.Sha256Hex(bytes), IsLibrary = isLibrary, Reason = reason };
             items[name] = it;
             queue.Enqueue(it);
         }
@@ -157,7 +156,7 @@ internal sealed class Reloader
     private static List<Item> TopologicalOrder(List<Item> items)
     {
         var names = new HashSet<string>(items.Select(i => i.Name), StringComparer.OrdinalIgnoreCase);
-        var refs = items.ToDictionary(i => i.Name, i => ReferencedNames(i.Bytes).Where(names.Contains).ToHashSet(StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase);
+        var refs = items.ToDictionary(i => i.Name, i => AssemblyMeta.ReferencedNames(i.Bytes).Where(names.Contains).ToHashSet(StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase);
         var ordered = new List<Item>();
         var placed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         while (ordered.Count < items.Count)
@@ -220,17 +219,7 @@ internal sealed class Reloader
             byte[]? pdb = null;
             var pdbPath = System.IO.Path.ChangeExtension(it.Path, ".pdb");
             if (File.Exists(pdbPath) && TryRead(pdbPath, out var pdbBytes)) pdb = pdbBytes;
-            var ctx = new ModLoadContext(it.Name + " #" + (++_generation));
-            Assembly asm;
-            try
-            {
-                // From a copy in the shadow folder: a real Location, and the original stays unlocked.
-                asm = ctx.LoadFromAssemblyPath(StartupLoader.ShadowCopyForReload(it.Path, it.Bytes, pdb, _generation));
-            }
-            catch (IOException)
-            {
-                asm = ctx.LoadFromStream(new MemoryStream(it.Bytes), pdb == null ? null : new MemoryStream(pdb));
-            }
+            Assembly asm = LoadNewBuild(it, pdb);
             StartupLoader.RememberLocation(asm, it.Path);
             StartupLoader.EnsureLocationPatch(asm, it.Path);
             Latest[it.Name] = asm;
@@ -275,6 +264,26 @@ internal sealed class Reloader
             _log.Error("Reload of " + it.Name + " failed: " + e);
             return false;
         }
+    }
+
+    /// <summary>
+    /// Loads a new build from a copy in the shadow folder (a real Location; the original stays unlocked).
+    /// IL2CPP (.NET 6): into its own AssemblyLoadContext, whose resolver prefers the newest reloaded builds.
+    /// Mono: there are no load contexts and Mono binds a reference to the first loaded assembly of that name, so the
+    /// build is renamed ("Name__hrN") and its references to reloaded assemblies are pointed at their current names.
+    /// </summary>
+    private Assembly LoadNewBuild(Item it, byte[]? pdb)
+    {
+        int gen = ++_generation;
+#if MONO
+        var current = Latest.ToDictionary(kv => kv.Key, kv => kv.Value.GetName().Name!, StringComparer.OrdinalIgnoreCase);
+        var (dll, newPdb) = AssemblyMeta.Rename(it.Bytes, pdb, AsmNames.Unique(it.Name, gen), current);
+        return Assembly.LoadFrom(StartupLoader.ShadowCopyForReload(it.Path, dll, newPdb, gen));
+#else
+        var ctx = new ModLoadContext(it.Name + " #" + gen);
+        try { return ctx.LoadFromAssemblyPath(StartupLoader.ShadowCopyForReload(it.Path, it.Bytes, pdb, gen)); }
+        catch (IOException) { return ctx.LoadFromStream(new MemoryStream(it.Bytes), pdb == null ? null : new MemoryStream(pdb)); }
+#endif
     }
 
     /// <summary>
@@ -323,7 +332,12 @@ internal sealed class Reloader
     private void RetireOldBuild(string name, HashSet<Assembly> oldAssemblies, HashSet<string> group)
     {
         var parts = new List<string>();
+        // Classes whose instances the game drives directly: injected Il2Cpp classes, or MonoBehaviours on Mono.
+#if MONO
+        var injected = oldAssemblies.SelectMany(UnityApi.ComponentTypesIn).ToList();
+#else
         var injected = oldAssemblies.SelectMany(InjectedTypes.InjectedIn).ToList();
+#endif
         if (_destroyOld())
         {
             int destroyed = UnityApi.DestroyPersistentObjects(name, _log);
@@ -331,7 +345,7 @@ internal sealed class Reloader
             if (injected.Count > 0)
             {
                 int instances = UnityApi.DestroyInstancesOf(injected, _log);
-                if (instances > 0) parts.Add("destroyed " + instances + " instance(s) of old injected classes");
+                if (instances > 0) parts.Add("destroyed " + instances + " instance(s) of old " + (Compat.IsMono ? "component" : "injected") + " classes");
             }
         }
         if (_retireOldBuild())
@@ -347,12 +361,14 @@ internal sealed class Reloader
                     if (retired + failed > 0) parts.Add("retired " + retired + " old method(s)" + (failed > 0 ? " (" + failed + " failed)" : "") + " in " + ms + " ms");
                 }
         }
+#if !MONO
         // The new build registers classes with the same names; Il2CppInterop would refuse them otherwise.
         if (injected.Count > 0)
         {
             int released = InjectedTypes.Release(injected, _log);
             if (released > 0) parts.Add("released " + released + " injected class name(s)");
         }
+#endif
         if (parts.Count > 0) _log.Msg(name + ": " + string.Join("; ", parts) + ".");
     }
 
@@ -367,8 +383,8 @@ internal sealed class Reloader
     /// <summary>Loaded melon assemblies and libraries that reference <paramref name="name"/>.</summary>
     private IEnumerable<string> DependentsOf(string name) =>
         MelonAssembly.LoadedAssemblies
-            .Where(a => a.Assembly.GetReferencedAssemblies().Any(r => string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase)))
-            .Select(a => a.Assembly.GetName().Name!)
+            .Where(a => a.Assembly.GetReferencedAssemblies().Any(r => string.Equals(AsmNames.Strip(r.Name), name, StringComparison.OrdinalIgnoreCase)))
+            .Select(a => AsmNames.Of(a.Assembly))
             .Where(n => !string.Equals(n, name, StringComparison.OrdinalIgnoreCase) && n != _selfName && !_isIgnored(n))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -383,28 +399,16 @@ internal sealed class Reloader
         if (asm == null) yield break;
         foreach (var r in asm.GetReferencedAssemblies())
         {
-            if (r.Name == null || !IsLibrary(r.Name)) continue;
-            var lib = FindLoaded(r.Name).First().Assembly;
+            var rn = AsmNames.Strip(r.Name);
+            if (rn.Length == 0 || !IsLibrary(rn)) continue;
+            var lib = FindLoaded(rn).First().Assembly;
             if (lib.GetReferencedAssemblies().Any(x => x.Name is "MelonLoader" or "Il2CppInterop.Runtime" or "UnityEngine.CoreModule" or "UnityEngine"))
-                yield return r.Name;
+                yield return rn;
         }
-    }
-
-    private static IEnumerable<string> ReferencedNames(byte[] bytes)
-    {
-        var list = new List<string>();
-        try
-        {
-            using var pe = new PEReader(new MemoryStream(bytes));
-            var md = pe.GetMetadataReader();
-            foreach (var h in md.AssemblyReferences) list.Add(md.GetString(md.GetAssemblyReference(h).Name));
-        }
-        catch { }
-        return list;
     }
 
     private static IEnumerable<MelonAssembly> FindLoaded(string name) =>
-        MelonAssembly.LoadedAssemblies.Where(a => string.Equals(a.Assembly.GetName().Name, name, StringComparison.OrdinalIgnoreCase)).ToList();
+        MelonAssembly.LoadedAssemblies.Where(a => string.Equals(AsmNames.Of(a.Assembly), name, StringComparison.OrdinalIgnoreCase)).ToList();
 
     /// <summary>MelonAssembly.LoadMelonAssembly returns a cached entry with the same FullName, so the old one must go.</summary>
     private static void ForgetMelonAssembly(MelonAssembly ma)
@@ -479,45 +483,6 @@ internal sealed class Reloader
         catch (UnauthorizedAccessException) { bytes = Array.Empty<byte>(); return false; }
     }
 
-    /// <summary>Reads the assembly name and checks for [MelonInfo] without loading anything. False for partial/non-.NET files.</summary>
-    private static bool TryInspect(byte[] bytes, out string name, out bool isMelon)
-    {
-        name = ""; isMelon = false;
-        try
-        {
-            using var pe = new PEReader(new MemoryStream(bytes), PEStreamOptions.PrefetchEntireImage);
-            if (!pe.HasMetadata) return false;
-            var md = pe.GetMetadataReader();
-            if (!md.IsAssembly) return false;
-            var def = md.GetAssemblyDefinition();
-            name = md.GetString(def.Name);
-            foreach (var h in def.GetCustomAttributes())
-            {
-                if (AttributeTypeName(md, md.GetCustomAttribute(h)) == "MelonInfoAttribute") { isMelon = true; break; }
-            }
-            return name.Length > 0;
-        }
-        catch (BadImageFormatException) { return false; }
-        catch (InvalidOperationException) { return false; }
-    }
-
-    private static string? AttributeTypeName(MetadataReader md, CustomAttribute attr)
-    {
-        if (attr.Constructor.Kind == HandleKind.MemberReference)
-        {
-            var parent = md.GetMemberReference((MemberReferenceHandle)attr.Constructor).Parent;
-            if (parent.Kind == HandleKind.TypeReference) return md.GetString(md.GetTypeReference((TypeReferenceHandle)parent).Name);
-        }
-        else if (attr.Constructor.Kind == HandleKind.MethodDefinition)
-        {
-            var type = md.GetMethodDefinition((MethodDefinitionHandle)attr.Constructor).GetDeclaringType();
-            return md.GetString(md.GetTypeDefinition(type).Name);
-        }
-        return null;
-    }
-
-    private static string Sha256(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes));
-
     private static bool PathEquals(string a, string b) =>
         string.Equals(a.TrimEnd('\\', '/'), b.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
 
@@ -545,6 +510,7 @@ internal static class LoaderFolders
     }
 }
 
+#if !MONO
 /// <summary>One per reload. Dependencies resolve to the newest reloaded build of a mod, else to whatever the default context has.</summary>
 internal sealed class ModLoadContext : AssemblyLoadContext
 {
@@ -561,3 +527,4 @@ internal sealed class ModLoadContext : AssemblyLoadContext
         catch { return null; }
     }
 }
+#endif

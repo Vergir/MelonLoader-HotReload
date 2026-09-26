@@ -9,9 +9,9 @@ using UnityEngine.SceneManagement;
 namespace HotReload;
 
 /// <summary>
-/// Everything that touches Unity / Il2Cpp interop types. HotReload is a plugin and registers before the interop
-/// assemblies can be loaded, so no Unity type may appear in a field or signature of the plugin class itself;
-/// these methods are only JIT-compiled once the game runs.
+/// Everything that touches Unity types (Il2Cpp interop types in the IL2CPP build). HotReload is a plugin and registers
+/// before the interop assemblies can be loaded, so no Unity type may appear in a field or signature of the plugin class
+/// itself; these methods are only JIT-compiled once the game runs.
 /// </summary>
 internal static class UnityApi
 {
@@ -95,8 +95,13 @@ internal static class UnityApi
         {
             try
             {
+#if MONO
+                if (obj == null) continue; // already destroyed
+                var go = obj as GameObject ?? (obj as Component)?.gameObject;
+#else
                 if (obj == null || obj.WasCollected) continue; // already destroyed
                 var go = obj.TryCast<GameObject>() ?? obj.TryCast<Component>()?.gameObject;
+#endif
                 if (go == null) continue;
                 UnityEngine.Object.Destroy(go);
                 n++;
@@ -106,9 +111,22 @@ internal static class UnityApi
         return n;
     }
 
+#if MONO
+    /// <summary>Mono: the old build's Component / ScriptableObject subclasses, whose instances Unity drives directly.</summary>
+    public static IEnumerable<Type> ComponentTypesIn(System.Reflection.Assembly asm)
+    {
+        Type?[] types;
+        try { types = asm.GetTypes(); }
+        catch (System.Reflection.ReflectionTypeLoadException e) { types = e.Types; }
+        foreach (var t in types)
+            if (t != null && !t.ContainsGenericParameters && (typeof(Component).IsAssignableFrom(t) || typeof(ScriptableObject).IsAssignableFrom(t)))
+                yield return t;
+    }
+#endif
+
     /// <summary>
-    /// Destroys every live Unity object whose Il2Cpp class is one of the old build's injected types (components,
-    /// ScriptableObjects). Their GameObjects stay unless the mod also kept them across scenes.
+    /// Destroys every live Unity object of the old build's classes: injected Il2Cpp classes, or on Mono its Component
+    /// and ScriptableObject subclasses. Their GameObjects stay unless the mod also kept them across scenes.
     /// </summary>
     public static int DestroyInstancesOf(IEnumerable<Type> injectedTypes, MelonLogger.Instance log)
     {
@@ -118,8 +136,11 @@ internal static class UnityApi
             if (!typeof(UnityEngine.Object).IsAssignableFrom(t)) continue;
             try
             {
-                var il2cppType = Il2CppInterop.Runtime.Il2CppType.From(t);
-                foreach (var obj in Resources.FindObjectsOfTypeAll(il2cppType))
+#if MONO
+                foreach (var obj in Resources.FindObjectsOfTypeAll(t))
+#else
+                foreach (var obj in Resources.FindObjectsOfTypeAll(Il2CppInterop.Runtime.Il2CppType.From(t)))
+#endif
                 {
                     if (obj == null) continue;
                     UnityEngine.Object.Destroy(obj);

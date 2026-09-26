@@ -7,7 +7,7 @@ using System.Text;
 namespace HotReloadCheck;
 
 /// <summary>
-/// Scans compiled MelonLoader mods (no source needed) and reports whether they can be hot-reloaded by HotReload 0.7,
+/// Scans compiled MelonLoader mods (no source needed) and reports whether they can be hot-reloaded by HotReload 0.8 (IL2CPP or Mono build),
 /// and what the author would have to add. It reads metadata only: which APIs a mod references, which types it
 /// defines and which callbacks it overrides. It does not execute or load anything.
 ///
@@ -394,7 +394,6 @@ internal static class Rules
         bool hasDeinit = s.DefinedMethods.Contains("OnDeinitializeMelon");
         string verdict =
             s.Kind == MelonKind.Library ? "LIBRARY" :
-            s.Flavor == Flavor.Mono ? "UNSUPPORTED (Mono game)" :
             s.Flavor == Flavor.Unhollower ? "UNSUPPORTED (MelonLoader 0.5 era)" :
             findings.Any(f => f.Severity == Severity.Blocker) ? "BLOCKED" :
             !findings.Any(f => f.Severity == Severity.Cleanup) ? "READY" :
@@ -416,7 +415,6 @@ internal static class Output
         ["NEEDS CLEANUP"] = "uses something HotReload cannot clean up and has no OnDeinitializeMelon; author must add cleanup",
 
         ["BLOCKED"] = "uses something HotReload cannot reload",
-        ["UNSUPPORTED (Mono game)"] = "built for a Mono Unity game; HotReload supports IL2CPP games on MelonLoader 0.7 only",
         ["UNSUPPORTED (MelonLoader 0.5 era)"] = "built against Unhollower; does not load on MelonLoader 0.6+ anyway",
         ["LIBRARY"] = "no [MelonInfo]; not a mod",
     };
@@ -426,7 +424,7 @@ internal static class Output
         var sb = new StringBuilder();
         sb.AppendLine("# HotReload compatibility report");
         sb.AppendLine();
-        sb.AppendLine("Static scan of compiled DLLs (metadata only), against HotReload 0.7. \"Cleanup\" findings are things HotReload cannot undo itself; " +
+        sb.AppendLine("Static scan of compiled DLLs (metadata only), against HotReload 0.8. \"Cleanup\" findings are things HotReload cannot undo itself; " +
                       "whether the mod's OnDeinitializeMelon undoes them needs a look at the code or a test.");
         sb.AppendLine();
         sb.AppendLine("| Mod | Version | Author | Kind | Verdict | Cleanup items | Handled | Depends on |");

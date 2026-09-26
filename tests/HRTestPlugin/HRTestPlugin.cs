@@ -2,7 +2,6 @@ using HRTestPlugin;
 using MelonLoader;
 
 [assembly: MelonInfo(typeof(HRTestPluginMelon), "HRTestPlugin", "1.0.0", "HotReload tests")]
-[assembly: MelonGame("Moon Studios", "NoRestForTheWicked")]
 
 namespace HRTestPlugin;
 

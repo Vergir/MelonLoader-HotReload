@@ -9,7 +9,8 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <AssemblyName>HotReload</AssemblyName>
     <RootNamespace>HotReload</RootNamespace>
-    <Version>0.7.0</Version>
+    <Version>0.8.0</Version>
+    <DefineConstants>$(DefineConstants);IL2CPP</DefineConstants>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <GenerateDependencyFile>false</GenerateDependencyFile>
     <DebugType>portable</DebugType>
@@ -25,12 +26,13 @@
 
   <ItemGroup>
     <!-- tests/ and checker/ are separate projects -->
-    <Compile Remove="tests/**;checker/**" />
-    <None Remove="tests/**;checker/**" />
+    <Compile Remove="tests/**;checker/**;mono/**" />
+    <None Remove="tests/**;checker/**;mono/**" />
   </ItemGroup>
 
   <ItemGroup>
     <Reference Include="MelonLoader"><HintPath>$(MLDir)\MelonLoader.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Mono.Cecil"><HintPath>$(MLDir)\Mono.Cecil.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="0Harmony"><HintPath>$(MLDir)\0Harmony.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Il2CppInterop.Runtime"><HintPath>$(MLDir)\Il2CppInterop.Runtime.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Il2Cppmscorlib"><HintPath>$(InteropDir)\Il2Cppmscorlib.dll</HintPath><Private>false</Private></Reference>

@@ -45,14 +45,20 @@ internal static class StartupLoader
     public static int Shadowed { get; private set; }
 
     /// <summary>Makes Assembly.Location of <paramref name="asm"/> return <paramref name="path"/>.</summary>
-    public static void RememberLocation(Assembly asm, string path) => Locations.AddOrUpdate(asm, path);
+    public static void RememberLocation(Assembly asm, string path)
+    {
+        Locations.Remove(asm);
+        Locations.Add(asm, path);
+    }
 
     public static bool InstallLocationPatch(HarmonyLib.Harmony harmony, MelonLogger.Instance log)
     {
         _log = log;
         try
         {
-            var runtimeAssembly = typeof(object).Assembly.GetType("System.Reflection.RuntimeAssembly", throwOnError: true)!;
+            // .NET: System.Reflection.RuntimeAssembly; Mono: RuntimeAssembly or (older) MonoAssembly.
+            var runtimeAssembly = typeof(object).Assembly.GetType("System.Reflection.RuntimeAssembly", throwOnError: false)
+                                  ?? typeof(object).Assembly.GetType("System.Reflection.MonoAssembly", throwOnError: true)!;
             _locationGetter = AccessTools.PropertyGetter(runtimeAssembly, nameof(Assembly.Location));
             _harmony = harmony;
             harmony.Patch(_locationGetter, postfix: LocationPostfixMethod);
@@ -99,7 +105,7 @@ internal static class StartupLoader
     /// </summary>
     public static string ShadowCopyForReload(string originalPath, byte[] dll, byte[]? pdb, int generation)
     {
-        var dir = Path.Combine(_shadowDir ?? Path.Combine(MelonEnvironment.UserDataDirectory, "HotReload", "Shadow", Environment.ProcessId.ToString()),
+        var dir = Path.Combine(_shadowDir ?? Path.Combine(MelonEnvironment.UserDataDirectory, "HotReload", "Shadow", Compat.ProcessId.ToString()),
                                "reload-" + generation);
         Directory.CreateDirectory(dir);
         var copy = Path.Combine(dir, Path.GetFileName(originalPath));
@@ -141,12 +147,12 @@ internal static class StartupLoader
             {
                 try { Directory.Delete(old, recursive: true); } catch { /* another game instance still holds it */ }
             }
-            _shadowDir = Path.Combine(root, Environment.ProcessId.ToString());
+            _shadowDir = Path.Combine(root, Compat.ProcessId.ToString());
             Directory.CreateDirectory(_shadowDir);
             foreach (var i in modIdx)
             {
                 var original = Path.GetFullPath(dirs[i]).TrimEnd('\\', '/');
-                var rel = Path.GetRelativePath(mods, original);
+                var rel = Compat.RelativePath(mods, original);
                 var target = rel == "." ? _shadowDir : Path.Combine(_shadowDir, "sub", rel);
                 Directory.CreateDirectory(target);
                 foreach (var f in Directory.EnumerateFiles(original, "*.*", SearchOption.TopDirectoryOnly)

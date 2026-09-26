@@ -20,14 +20,12 @@ internal static class Callers
     };
 
     /// <summary>
-    /// Simple name of the mod behind the current call: the first loaded melon assembly on the stack (so a helper library
-    /// such as UniverseLib acting for UnityExplorer counts as UnityExplorer), else the first non-infrastructure assembly,
-    /// else null (e.g. the game itself called).
+    /// Original name of the mod or MelonLoader library behind the current call: the first loaded melon assembly on the
+    /// stack, or null when none is (the game itself called; on Mono the game's own managed code calls Unity too).
     /// </summary>
     public static string? FindModAssembly(int skipFrames = 1)
     {
         var frames = new StackTrace(skipFrames + 1, false).GetFrames();
-        string? firstOther = null;
         HashSet<System.Reflection.Assembly>? melons = null;
         foreach (var f in frames)
         {
@@ -40,9 +38,8 @@ internal static class Callers
                 if (name.StartsWith(p, StringComparison.OrdinalIgnoreCase)) { infra = true; break; }
             if (infra) continue;
             melons ??= new HashSet<System.Reflection.Assembly>(MelonAssembly.LoadedAssemblies.Select(a => a.Assembly));
-            if (melons.Contains(asm)) return name;
-            firstOther ??= name;
+            if (melons.Contains(asm)) return AsmNames.Of(asm);
         }
-        return firstOther;
+        return null;
     }
 }

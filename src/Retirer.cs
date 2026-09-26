@@ -13,7 +13,7 @@ namespace HotReload;
 /// "Retires" an old build after a reload: every method of it that the game or the runtime can still call on its own is
 /// patched with a prefix that skips the body and returns the default value. That covers
 ///  - methods turned into delegates (found by scanning the IL for ldftn/ldvirtftn): lambdas, event handlers,
-///    UI listeners, timer and thread-pool callbacks, Il2Cpp delegates handed to the game;
+///    UI listeners, timer and thread-pool callbacks, delegates handed to the game;
 ///  - iterator and async state machines (MoveNext): coroutines end on their next step, pending async work stops.
 /// Stale behaviour stops instead of running old code against state that is gone. A method that is executing at that
 /// moment (e.g. a loop on a background thread) finishes its current call.

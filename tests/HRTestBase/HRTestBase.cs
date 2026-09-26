@@ -1,15 +1,16 @@
 using System.Collections;
 using System.Linq;
 using HarmonyLib;
+#if !MONO
 using Il2CppInterop.Runtime;
 using Il2CppInterop.Runtime.Injection;
+#endif
 using HRTestBase;
 using MelonLoader;
 using UnityEngine;
 using UnityEngine.UI;
 
 [assembly: MelonInfo(typeof(HRTestBaseMod), "HRTestBase", "1.0.0", "HotReload tests")]
-[assembly: MelonGame("Moon Studios", "NoRestForTheWicked")]
 [assembly: HarmonyDontPatchAll]
 
 namespace HRTestBase;
@@ -53,8 +54,10 @@ public class HRTestBaseMod : MelonMod
         settings.SaveToFile(false);
         LoggerInstance.Msg("plain category entry Reloads = " + _reloads.Value);
 
+#if !MONO
         // Il2Cpp class injection: the reloaded build registers a class with the same full name.
         ClassInjector.RegisterTypeInIl2Cpp<HRTestBehaviour>();
+#endif
         HRTestBehaviour.Build = Greeting();
         new GameObject("HRTestBase_Behaviour").AddComponent<HRTestBehaviour>(); // normal scene object, not kept across scenes
 
@@ -101,7 +104,13 @@ public class HRTestBaseMod : MelonMod
         {
             int n = Resources.FindObjectsOfTypeAll<GameObject>().Count(g => g.name == PersistentName);
             LoggerInstance.Msg(PersistentName + " objects alive: " + n);
-            LoggerInstance.Msg("HRTestBehaviour instances alive: " + Resources.FindObjectsOfTypeAll(Il2CppType.Of<HRTestBehaviour>()).Length);
+            LoggerInstance.Msg("HRTestBehaviour instances alive: " + Resources.FindObjectsOfTypeAll(
+#if MONO
+                typeof(HRTestBehaviour)
+#else
+                Il2CppType.Of<HRTestBehaviour>()
+#endif
+                ).Length);
         }
     }
 
@@ -111,13 +120,15 @@ public class HRTestBaseMod : MelonMod
         LoggerInstance.Msg("OnSceneWasLoaded " + sceneName + " (" + Greeting() + ")");
 }
 
-/// <summary>Injected into Il2Cpp; logs from its Update every 3 seconds with the build that created it.</summary>
+/// <summary>A MonoBehaviour (injected into Il2Cpp on IL2CPP); logs from its Update every 3 seconds with the build that created it.</summary>
 public class HRTestBehaviour : MonoBehaviour
 {
     public static string Build = "";
     private float _next;
 
+#if !MONO
     public HRTestBehaviour(System.IntPtr ptr) : base(ptr) { }
+#endif
 
     private void Update()
     {
