@@ -100,7 +100,7 @@ public class HRTestBaseMod : MelonMod
         catch (System.Exception e) { LoggerInstance.Error("loading the test bundles failed: " + e.Message); }
     }
 
-    // IL2CPP games can strip AssetBundle.LoadFromFile (No Rest for the Wicked does; Addressables keeps the async loader).
+    // IL2CPP games can strip AssetBundle.LoadFromFile; games that use Addressables keep the async loader.
     private static UnityEngine.AssetBundle? LoadBundle(string path)
     {
         try { return UnityEngine.AssetBundle.LoadFromFile(path); }

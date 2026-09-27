@@ -1,7 +1,8 @@
 <#
 .SYNOPSIS
   Tests HotReload on a Steam Deck (Linux + Proton) from Windows over SSH: deploys HotReload and the IL2CPP test fixtures
-  into the Deck's copy of an IL2CPP game (No Rest for the Wicked by default), triggers reloads, reads the log.
+  into the Deck's copy of an IL2CPP game, triggers reloads, reads the log. The fixtures are built against the Windows copy
+  of the same game (GameDir in Local.props).
 
 .DESCRIPTION
   One-time preparation on the Deck (Desktop Mode, Konsole):
@@ -9,16 +10,16 @@
       sudo systemctl enable --now sshd         # start the SSH server, also after reboots
       ip -4 addr show wlan0                    # the Deck's address, e.g. 192.168.1.50
   One-time on Windows (asks for the Deck password once, then works without it):
-      pwsh tools/deck-test.ps1 Setup -Deck deck@192.168.1.50
+      pwsh tools/deck-test.ps1 Setup -Deck deck@192.168.1.50 -GameFolder MyGame
 
   Then, with the game installed on the Deck with MelonLoader (launch option WINEDLLOVERRIDES="version=n,b" %command%):
-      pwsh tools/deck-test.ps1 Check  -Deck deck@192.168.1.50      # finds the game, shows MelonLoader / HotReload state
-      pwsh tools/deck-test.ps1 Deploy -Deck deck@192.168.1.50      # HotReload + fixtures + test bundles (game closed)
+      pwsh tools/deck-test.ps1 Check  -Deck deck@192.168.1.50 -GameFolder MyGame      # finds the game, shows MelonLoader / HotReload state
+      pwsh tools/deck-test.ps1 Deploy -Deck deck@192.168.1.50 -GameFolder MyGame      # HotReload + fixtures + test bundles (game closed)
       (start the game on the Deck)
-      pwsh tools/deck-test.ps1 Log    -Deck deck@192.168.1.50      # HotReload / fixture lines of the current log
-      pwsh tools/deck-test.ps1 Reload -Deck deck@192.168.1.50 -Version 1.0.2          # new HRTestBase build
-      pwsh tools/deck-test.ps1 Reload -Deck deck@192.168.1.50 -Version 1.0.3 -WithLibrary
-      pwsh tools/deck-test.ps1 Cleanup -Deck deck@192.168.1.50     # removes the fixtures (game closed)
+      pwsh tools/deck-test.ps1 Log    -Deck deck@192.168.1.50 -GameFolder MyGame      # HotReload / fixture lines of the current log
+      pwsh tools/deck-test.ps1 Reload -Deck deck@192.168.1.50 -GameFolder MyGame -Version 1.0.2          # new HRTestBase build
+      pwsh tools/deck-test.ps1 Reload -Deck deck@192.168.1.50 -GameFolder MyGame -Version 1.0.3 -WithLibrary
+      pwsh tools/deck-test.ps1 Cleanup -Deck deck@192.168.1.50 -GameFolder MyGame     # removes the fixtures (game closed)
 
   Builds run on Windows against the Windows copy of the game (Local.props GameDir): the Deck runs the same Windows
   build through Proton, so the binaries are identical.
@@ -26,9 +27,10 @@
 param(
     [Parameter(Mandatory, Position = 0)] [ValidateSet("Setup", "Check", "Deploy", "Log", "Reload", "Cleanup")] [string] $Action,
     [Parameter(Mandatory)] [string] $Deck,                      # ssh target, e.g. deck@192.168.1.50
-    [string] $GameFolder = "NoRestForTheWicked",                # steamapps/common/<GameFolder>
+    [Parameter(Mandatory)] [string] $GameFolder,                # steamapps/common/<GameFolder> on the Deck
     [string] $GameDir,                                          # full path on the Deck; found automatically when empty
     [string] $Version = "1.0.1",
+    [string] $Bundles,                                          # Deploy: a folder with HRTestBundleKept.bundle / HRTestBundleDropped.bundle (optional)
     [switch] $WithLibrary
 )
 $ErrorActionPreference = "Stop"
@@ -81,9 +83,7 @@ switch ($Action) {
         Copy-To @("$repo/tests/HRTestBase/bin/Release/HRTestBase.dll", "$repo/tests/HRTestBase/bin/Release/HRTestBase.pdb") "$g/Mods"
         Copy-To @("$repo/tests/HRTestDependent/bin/Release/HRTestDependent.dll") "$g/Mods/HRTestSub"
         Remote "echo '{ `"note`": `"HotReload test fixture`" }' > '$g/Mods/HRTestSub/manifest.json'" | Out-Null
-        $bundles = Join-Path $env:TEMP "hrtest-bundles"; New-Item -ItemType Directory -Force $bundles | Out-Null
-        & (Join-Path $PSScriptRoot "extract-test-bundles.ps1") -UserData $bundles | Out-Null
-        Copy-To (Get-ChildItem $bundles -Filter "HRTestBundle*.bundle").FullName "$g/UserData"
+        if ($Bundles) { Copy-To (Get-ChildItem $Bundles -Filter "HRTestBundle*.bundle").FullName "$g/UserData" }
         "deployed to $g; start the game on the Deck, then: deck-test.ps1 Log / Reload"
     }
     "Log" {
