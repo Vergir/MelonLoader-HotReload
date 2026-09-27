@@ -1,0 +1,54 @@
+name: CI
+
+# Builds HotReload (one net472 DLL for Mono and IL2CPP games) and the checker, runs the offline tests, and checks the
+# built DLL against every supported MelonLoader release. No game is needed anywhere: everything comes from NuGet and
+# the MelonLoader GitHub releases.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Build HotReload
+        run: dotnet build HotReload.csproj -c Release
+      - name: Build HotReloadCheck
+        run: dotnet build checker -c Release
+      - name: Offline tests
+        run: dotnet test tests/HotReload.Tests -c Release --logger "console;verbosity=normal"
+
+  api-compat:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Build HotReload
+        run: dotnet build HotReload.csproj -c Release
+      - name: Cache MelonLoader releases
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/hotreload-apicompat
+          key: melonloader-releases-${{ hashFiles('tools/apicompat.ps1') }}
+      - name: Check against MelonLoader 0.6.0 - 0.7.3
+        shell: pwsh
+        run: ./tools/apicompat.ps1

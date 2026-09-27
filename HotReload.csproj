@@ -44,9 +44,9 @@
     <PackageDownload Include="LavaGang.MelonLoader" Version="[$(MelonLoaderVersion)]" />
     <PackageDownload Include="HarmonyX" Version="[$(HarmonyXVersion)]" />
     <PackageDownload Include="Mono.Cecil" Version="[$(CecilVersion)]" />
-    <Reference Include="MelonLoader"><HintPath>$(NuGetPackageRoot)lavagang.melonloader\$(MelonLoaderVersion)\lib\net35\MelonLoader.dll</HintPath><Private>false</Private></Reference>
-    <Reference Include="0Harmony"><HintPath>$(NuGetPackageRoot)harmonyx\$(HarmonyXVersion)\lib\net35\0Harmony.dll</HintPath><Private>false</Private></Reference>
-    <Reference Include="Mono.Cecil"><HintPath>$(NuGetPackageRoot)mono.cecil\$(CecilVersion)\lib\net40\Mono.Cecil.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="MelonLoader"><HintPath>$(NuGetPackageRoot)lavagang.melonloader/$(MelonLoaderVersion)/lib/net35/MelonLoader.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="0Harmony"><HintPath>$(NuGetPackageRoot)harmonyx/$(HarmonyXVersion)/lib/net35/0Harmony.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Mono.Cecil"><HintPath>$(NuGetPackageRoot)mono.cecil/$(CecilVersion)/lib/net40/Mono.Cecil.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
 
   <!-- VersionInfo.Version / DownloadLink for [MelonInfo], generated from Directory.Build.props. -->

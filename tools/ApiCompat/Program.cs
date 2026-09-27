@@ -3,6 +3,18 @@ using System.Reflection.PortableExecutable;
 // apicompat <plugin.dll> <libdir>... : checks every member the plugin references in MelonLoader / 0Harmony / Mono.Cecil /
 // Il2CppInterop.Runtime (by type, name, parameter count) against each lib dir, plus the members HotReload reaches by
 // reflection. A library a dir does not ship (Il2CppInterop in net35) is skipped for that dir.
+// --optional <member>: a reflection target that may be missing (reported, not a failure), e.g. _modDirs before 0.7.1.
+// Exit code 1 when a referenced member or a non-optional reflection target is missing in any dir.
+var optional = new HashSet<string>();
+var positional = new List<string>();
+for (int a = 0; a < args.Length; a++)
+{
+    if (args[a] == "--optional" && a + 1 < args.Length) optional.Add(args[++a]);
+    else positional.Add(args[a]);
+}
+if (positional.Count < 2) { Console.Error.WriteLine("usage: apicompat <plugin.dll> <libdir>... [--optional <member>]"); return 2; }
+args = positional.ToArray();
+int failures = 0;
 var plugin = args[0];
 string[] libs = { "MelonLoader", "0Harmony", "Mono.Cecil", "Il2CppInterop.Runtime" };
 var used = new List<(string lib, string type, string member, int pars)>();
@@ -77,7 +89,11 @@ foreach (var dir in args.Skip(1))
     Console.WriteLine($"{label}: {used.Distinct().Count(u => present.Contains(u.lib))} refs, {missing.Count} missing" +
                       (missing.Count > 0 ? ": " + string.Join(", ", missing.Select(m => m.type + (m.member.Length > 0 ? "::" + m.member + "/" + m.pars : ""))) : "") +
                       $"; reflection targets missing: {(reflTypesMissing.Count == 0 ? "none" : string.Join(", ", reflTypesMissing))}");
+    var fatal = reflTypesMissing.Where(m => !optional.Contains(m)).ToList();
+    if (missing.Count > 0 || fatal.Count > 0) { failures++; Console.WriteLine("  FAIL" + (fatal.Count > 0 ? ": required reflection targets missing: " + string.Join(", ", fatal) : "")); }
 }
+Console.WriteLine(failures == 0 ? "API compatibility: OK" : "API compatibility: " + failures + " folder(s) failed");
+return failures == 0 ? 0 : 1;
 
 static (string, string) Name(MetadataReader md, TypeReferenceHandle h)
 {

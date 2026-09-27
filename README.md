@@ -213,6 +213,15 @@ To copy each build into games' `Plugins/` folders, set `GameDir` and/or `MonoGam
 `Local.props.example`, git-ignored), or use `MELONLOADER_GAME_DIR` / `MELONLOADER_MONO_GAME_DIR` or `-p:GameDir=...`.
 `-p:DeployToGame=false` skips the copy. `pwsh ./package.ps1` builds the release zips into `dist/`.
 
+```bash
+dotnet test tests/HotReload.Tests     # offline tests, no game
+pwsh tools/apicompat.ps1              # the built DLL against MelonLoader 0.6.0-0.7.3 (downloads them once)
+```
+
+GitHub Actions run the same on every push (`.github/workflows/ci.yml`, Windows and Linux). Pushing a tag `vX.Y.Z` that
+matches `HotReloadVersion` in `Directory.Build.props` builds, tests and publishes the release with its zips
+(`.github/workflows/release.yml`).
+
 The test fixtures in `tests/` (and their Mono projects in `tests/mono/`) do need a game: they use real Unity and Il2Cpp
 interop types, so they compile against the game set in `Local.props`.
 

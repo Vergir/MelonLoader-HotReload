@@ -12,7 +12,7 @@
     <IsPackable>false</IsPackable>
     <!-- HotReload.dll is net472; .NET 8 runs it, and the compat shims cover what the tests touch. -->
     <NoWarn>$(NoWarn);MSB3277;NU1701</NoWarn>
-    <HotReloadDir>$(MSBuildThisFileDirectory)..\..\bin\$(Configuration)\</HotReloadDir>
+    <HotReloadDir>$(MSBuildThisFileDirectory)../../bin/$(Configuration)/</HotReloadDir>
   </PropertyGroup>
 
   <ItemGroup>
@@ -29,7 +29,7 @@
     <!-- Build HotReload first (net472, so no assembly reference through the project), then reference its output. -->
     <ProjectReference Include="..\..\HotReload.csproj" ReferenceOutputAssembly="false" SkipGetTargetFrameworkProperties="true" Properties="DeployToGame=false" />
     <Reference Include="HotReload"><HintPath>$(HotReloadDir)HotReload.dll</HintPath></Reference>
-    <Reference Include="MelonLoader"><HintPath>$(NuGetPackageRoot)lavagang.melonloader\0.7.3\lib\net35\MelonLoader.dll</HintPath><Private>true</Private></Reference>
+    <Reference Include="MelonLoader"><HintPath>$(NuGetPackageRoot)lavagang.melonloader/0.7.3/lib/net35/MelonLoader.dll</HintPath><Private>true</Private></Reference>
     <ProjectReference Include="..\..\checker\HotReloadCheck.csproj" />
   </ItemGroup>
 </Project>
