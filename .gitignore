@@ -4,3 +4,6 @@ obj/
 *.user
 Local.props
 dist/
+
+# Private working notes, never published
+backlog.md

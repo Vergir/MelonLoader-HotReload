@@ -10,7 +10,7 @@ pwsh tools/apicompat.ps1         # the built DLL against MelonLoader 0.6.0-0.7.3
 pwsh ./package.ps1               # release zips into dist/
 ```
 
-`MelonLoader_HotReload.sln` opens HotReload, the checker, the tests and ApiCompat in Visual Studio or Rider.
+`MelonLoader-HotReload.sln` opens HotReload, the checker, the tests and ApiCompat in Visual Studio or Rider.
 
 ## One DLL for both runtimes
 
@@ -37,9 +37,9 @@ HotReload's `[MelonInfo]`, the checker's reports and `package.ps1` all read them
 
 GitHub Actions (`.github/workflows/ci.yml`) build, test and run the API check on every push, on Windows and Linux.
 Pushing a tag `vX.Y.Z` that matches `HotReloadVersion` runs `.github/workflows/release.yml`: the same checks, then the
-release with `MelonLoader_HotReload.zip` and `HotReloadCheck.zip`, and the notes from that version's section of
+release with `MelonLoader-HotReload.zip` and `HotReloadCheck.zip`, and the notes from that version's section of
 [changelog.md](changelog.md). The asset names carry no version, so
-`https://github.com/Vergir/MelonLoader_HotReload/releases/latest/download/MelonLoader_HotReload.zip` always points at the
+`https://github.com/Vergir/MelonLoader-HotReload/releases/latest/download/MelonLoader-HotReload.zip` always points at the
 newest release.
 
 Testing in games: [testing.md](testing.md).

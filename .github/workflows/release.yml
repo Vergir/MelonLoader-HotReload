@@ -2,7 +2,7 @@ name: Release
 
 # Push a tag "vX.Y.Z" matching HotReloadVersion in Directory.Build.props: this builds and tests everything again, runs
 # the MelonLoader API check, packages the zips (package.ps1) and publishes a GitHub release with them. The asset names
-# carry no version, so https://github.com/<owner>/<repo>/releases/latest/download/MelonLoader_HotReload.zip always
+# carry no version, so https://github.com/<owner>/<repo>/releases/latest/download/MelonLoader-HotReload.zip always
 # points at the newest release. Release notes come from the matching "## X.Y.Z" section of docs/changelog.md, or are
 # generated from the commits when there is none.
 on:

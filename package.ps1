@@ -1,6 +1,6 @@
 # Builds the release zips into dist/. File names carry no version, so
-# https://github.com/<owner>/MelonLoader_HotReload/releases/latest/download/<file> always points at the newest release:
-#   MelonLoader_HotReload.zip   Plugins/HotReload.dll (+pdb), README.md, LICENSE. One DLL for Mono and IL2CPP games.
+# https://github.com/<owner>/MelonLoader-HotReload/releases/latest/download/<file> always points at the newest release:
+#   MelonLoader-HotReload.zip   Plugins/HotReload.dll (+pdb), README.md, LICENSE. One DLL for Mono and IL2CPP games.
 #   HotReloadCheck.zip          the compatibility scanner (needs the .NET 8 runtime)
 # Needs no game: everything builds from NuGet.
 # Usage: pwsh ./package.ps1
@@ -21,7 +21,7 @@ $stage = Join-Path $dist "stage"
 New-Item -ItemType Directory (Join-Path $stage "Plugins") -Force | Out-Null
 Copy-Item "bin/Release/HotReload.dll", "bin/Release/HotReload.pdb" (Join-Path $stage "Plugins")
 Copy-Item README.md, LICENSE $stage
-$zip = Join-Path $dist "MelonLoader_HotReload.zip"
+$zip = Join-Path $dist "MelonLoader-HotReload.zip"
 Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip
 Remove-Item $stage -Recurse -Force
 Write-Host $zip
