@@ -1,5 +1,7 @@
 # HotReload for MelonLoader
 
+![HotReload for MelonLoader](docs/images/header.png)
+
 A [MelonLoader](https://github.com/LavaGang/MelonLoader) plugin for mod authors: rebuild your mod and the running game
 picks up the new build, without a restart. It works in any Unity game, Mono or IL2CPP, and cleans up after the old build
 so the new one starts as if the game had just launched.
@@ -103,6 +105,8 @@ releases and the test mods; [docs/how-it-works.md](docs/how-it-works.md) explain
 The idea comes from [AutoReload](https://github.com/Hamunii/AutoReload) for BepInEx by Hamunii. Built on
 [MelonLoader](https://github.com/LavaGang/MelonLoader), [HarmonyX](https://github.com/BepInEx/HarmonyX),
 [Mono.Cecil](https://github.com/jbevain/cecil) and [Il2CppInterop](https://github.com/BepInEx/Il2CppInterop).
+The watermelon in the [header](docs/images/header.png) and [banner](docs/images/banner.png) images is MelonLoader's
+icon, from the MelonLoader project.
 
 ## License
 
