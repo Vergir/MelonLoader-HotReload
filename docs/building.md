@@ -39,7 +39,7 @@ GitHub Actions (`.github/workflows/ci.yml`) build, test and run the API check on
 Pushing a tag `vX.Y.Z` that matches `HotReloadVersion` runs `.github/workflows/release.yml`: the same checks, then the
 release with `MelonLoader-HotReload.zip` and `HotReloadCheck.zip`, and the notes from that version's section of
 [changelog.md](changelog.md). The asset names carry no version, so
-`https://github.com/Vergir/MelonLoader-HotReload/releases/latest/download/MelonLoader-HotReload.zip` always points at the
+`https://github.com/vergir/MelonLoader-HotReload/releases/latest/download/MelonLoader-HotReload.zip` always points at the
 newest release.
 
 Testing in games: [testing.md](testing.md).

@@ -6,8 +6,8 @@ A [MelonLoader](https://github.com/LavaGang/MelonLoader) plugin for mod authors:
 picks up the new build, without a restart. It works in any Unity game, Mono or IL2CPP, and cleans up after the old build
 so the new one starts as if the game had just launched.
 
-**[Download the latest release](https://github.com/Vergir/MelonLoader-HotReload/releases/latest/download/MelonLoader-HotReload.zip)**
-(one DLL for every game) · [all releases](https://github.com/Vergir/MelonLoader-HotReload/releases)
+**[Download the latest release](https://github.com/vergir/MelonLoader-HotReload/releases/latest/download/MelonLoader-HotReload.zip)**
+(one DLL for every game) · [all releases](https://github.com/vergir/MelonLoader-HotReload/releases)
 
 ## Features
 

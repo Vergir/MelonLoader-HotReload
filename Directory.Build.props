@@ -6,6 +6,6 @@
   -->
   <PropertyGroup>
     <HotReloadVersion>1.0.0</HotReloadVersion>
-    <HotReloadRepository>https://github.com/Vergir/MelonLoader-HotReload</HotReloadRepository>
+    <HotReloadRepository>https://github.com/vergir/MelonLoader-HotReload</HotReloadRepository>
   </PropertyGroup>
 </Project>

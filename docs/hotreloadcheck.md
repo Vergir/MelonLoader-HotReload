@@ -4,7 +4,7 @@
 what the author would have to add. It only reads metadata: which APIs a mod calls, which types and fields it defines,
 which callbacks it overrides. It never loads or runs a mod.
 
-Download `HotReloadCheck.zip` from the [releases](https://github.com/Vergir/MelonLoader-HotReload/releases) (needs the
+Download `HotReloadCheck.zip` from the [releases](https://github.com/vergir/MelonLoader-HotReload/releases) (needs the
 .NET 8 runtime), or build it from source:
 
 ```bash
