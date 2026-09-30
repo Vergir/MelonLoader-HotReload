@@ -17,6 +17,29 @@ setting on the first start. Edits apply while the game runs, except `ShadowCopyM
 | `FreshLibraries` | `true` | Reload the `UserLibs` libraries a mod uses together with it, so state the old build registered with them is gone. Only libraries that reference MelonLoader, Il2CppInterop or Unity count; other mods using the same library reload too. |
 | `RetireOldBuild` | `true` | Turn the old build's callbacks, coroutine steps and async steps into no-ops after a reload. |
 | `DestroyOldObjects` | `true` | Destroy the old build's objects kept across scenes and live instances of its classes, and unload its AssetBundles. |
+| `EchoUnityErrors` | `"AfterReload"` | Copy Unity errors and exceptions into the MelonLoader log (below). `AfterReload`, `Always` or `Off`. |
+
+## Unity errors
+
+An exception thrown inside game code goes to Unity's `Player.log`, not to MelonLoader's log. After a reload that is
+often the only sign that something broke, for example when the game walks a list that still holds an object the old
+build destroyed. HotReload listens to Unity's log and copies errors, asserts and exceptions into its own lines:
+
+```
+[HotReload] Unity exception 3 s after reloading MyMod: NullReferenceException: Object reference not set to an instance of an object.
+    at SettingsScreen.IsAnyDropDownOpen ()
+    at MenuScreen.Back ()
+[HotReload]   ... again 71 time(s): NullReferenceException: Object reference not set to an instance of an object.
+```
+
+* `AfterReload` (default): nothing before the first reload. After it, errors the game had not logged before the first
+  reload, so a game's usual noise stays out.
+* `Always`: every error from the start.
+* Each error is shown once per reload with a few lines of its stack; repeats are counted and reported at most every
+  10 seconds. At most 20 different errors per reload; the full text stays in `Player.log`.
+
+MelonLoader 0.7.1 and newer can copy the whole player log itself (`capture_player_logs = true` in
+`UserData/Loader.cfg`, or `--melonloader.captureplayerlogs`). With that on, HotReload leaves Unity errors to MelonLoader.
 
 ## The reload key
 

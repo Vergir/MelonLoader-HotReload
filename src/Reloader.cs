@@ -53,6 +53,16 @@ internal sealed class Reloader
     private readonly Dictionary<string, Dictionary<string, object?>> _carriedState = new(StringComparer.OrdinalIgnoreCase);
     private int _generation;
 
+    /// <summary>Called after every reload or unload, with "reloading X" / "unloading X".</summary>
+    public Action<string>? AfterReload;
+
+    /// <summary>
+    /// AppDomain data key set while HotReload brings a melon up in a running game: "reload" (an earlier build ran) or
+    /// "new" (a DLL added after startup); unset at game start. Lets a mod skip once-per-launch work without referencing
+    /// HotReload.
+    /// </summary>
+    public const string LoadingLateKey = "HotReload.LoadingLate";
+
     public Reloader(MelonLogger.Instance log, string selfName, Func<string, bool> isIgnored, Func<bool> replayScenes, Func<bool> reloadDependents,
         Func<bool> retireOldBuild, Func<bool> destroyOld, Func<bool> freshLibraries)
     {
@@ -209,6 +219,10 @@ internal sealed class Reloader
             ReportDown(group);
             return false;
         }
+        finally
+        {
+            AfterReload?.Invoke("reloading " + string.Join(", ", group.Where(i => !i.IsLibrary).Select(i => i.Name).DefaultIfEmpty(group[0].Name).ToArray()));
+        }
     }
 
     /// <summary>
@@ -240,6 +254,7 @@ internal sealed class Reloader
     private bool BringUp(Item it)
     {
         var sw = Stopwatch.StartNew();
+        AppDomain.CurrentDomain.SetData(LoadingLateKey, _source.ContainsKey(it.Name) ? "reload" : "new"); // _source: every build loaded so far
         try
         {
             byte[]? pdb = null;
@@ -295,6 +310,10 @@ internal sealed class Reloader
         {
             _log.Error("Reload of " + it.Name + " failed: " + e);
             return false;
+        }
+        finally
+        {
+            AppDomain.CurrentDomain.SetData(LoadingLateKey, null);
         }
     }
 
@@ -359,6 +378,7 @@ internal sealed class Reloader
         _source.Remove(name);
         Latest.Remove(name);
         _log.Msg("Unloaded " + name + " (its DLL was removed).");
+        AfterReload?.Invoke("unloading " + name);
         return true;
     }
 

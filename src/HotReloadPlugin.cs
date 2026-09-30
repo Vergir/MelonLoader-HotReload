@@ -50,6 +50,9 @@ public class HotReloadPlugin : MelonPlugin
     private Reloader _reloader = null!;
     private KeyInput _keys = null!;
     private MelonPreferences_Entry<string> _inputBackend = null!;
+    private MelonPreferences_Entry<string> _echoUnityErrors = null!;
+    private ErrorEcho _errorEcho = null!;
+    private string _unityErrorsStatus = "off";
     private bool _locationPatched;
     private string _shadowStatus = "off";
     private readonly List<FileSystemWatcher> _watchers = new List<FileSystemWatcher>();
@@ -76,10 +79,13 @@ public class HotReloadPlugin : MelonPlugin
         bool ddol = UnityApi.InstallPersistentObjectTracking(HarmonyInstance, LoggerInstance);
         int bundleHooks = AssetBundles.InstallTracking(HarmonyInstance, LoggerInstance);
         _keys = new KeyInput(LoggerInstance);
+        _errorEcho = new ErrorEcho(LoggerInstance.Warning);
+        _unityErrorsStatus = UnityErrors.Install(_errorEcho);
         WatchConfigFile();
         _reloader = new Reloader(LoggerInstance, typeof(HotReloadPlugin).Assembly.GetName().Name!, IsIgnored,
             replayScenes: () => _replayScenes.Value, reloadDependents: () => _reloadDependents.Value,
             retireOldBuild: () => _retireOldBuild.Value, destroyOld: () => _destroyPersistent.Value, freshLibraries: () => _freshLibraries.Value);
+        _reloader.AfterReload = what => _errorEcho.Reloaded(what, DateTime.UtcNow);
         CleanupOldFiles();
         StartupLoader.FixAllLocations();
         ApplyConfig();
@@ -87,7 +93,7 @@ public class HotReloadPlugin : MelonPlugin
         LoggerInstance.Msg("MelonLoader " + LoaderVersion() + ", " + Compat.RuntimeDescription() + (Compat.IsMono ? " (Mono game)" : " (IL2CPP game)") + ". Shadow copy: " + _shadowStatus
                            + "; Assembly.Location patch: " + (_locationPatched ? "on" : "off")
                            + "; DontDestroyOnLoad tracking: " + (ddol ? "on" : "off")
-                           + "; AssetBundle tracking: " + (bundleHooks > 0 ? bundleHooks + " load method(s)" : "fields only") + ReinjectionStatus() + "; reload key: " + _keys.Describe() + ".");
+                           + "; AssetBundle tracking: " + (bundleHooks > 0 ? bundleHooks + " load method(s)" : "fields only") + ReinjectionStatus() + "; Unity errors: " + UnityErrorsDescription() + "; reload key: " + _keys.Describe() + ".");
         if (_shadowCopy.Value) LoggerInstance.Msg(StartupLoader.Describe());
     }
 
@@ -119,6 +125,8 @@ public class HotReloadPlugin : MelonPlugin
             description: "Reload the UserLibs libraries a mod uses together with it (only libraries that reference MelonLoader, Il2CppInterop or Unity), so state the old build registered with them is gone. Mods sharing such a library reload too.");
         _inputBackend = _cat.CreateEntry("InputBackend", "Auto",
             description: "How the reload key is read: Auto (legacy Input, then Input System, then Windows key state), Legacy, InputSystem or Windows.");
+        _echoUnityErrors = _cat.CreateEntry("EchoUnityErrors", "AfterReload",
+            description: "Copy Unity errors and exceptions (normally only in Player.log) into this log, deduplicated, with the reload they followed: AfterReload (errors that are new since a reload), Always, or Off.");
         _cat.SaveToFile(false); // writes the file with defaults and descriptions on first run
     }
 
@@ -140,6 +148,8 @@ public class HotReloadPlugin : MelonPlugin
         }
         if (_configDirty) { _configDirty = false; ApplyConfig(); }
         if (_watcherFailed) { _watcherFailed = false; LoggerInstance.Warning("File watcher overflowed or failed; restarting it. Press " + _keys.KeyName + " if a change was missed."); ApplyConfig(force: true); }
+
+        _errorEcho.Flush(DateTime.UtcNow);
 
         if (_keys.Pressed())
         {
@@ -204,9 +214,13 @@ public class HotReloadPlugin : MelonPlugin
     private void ApplyConfig(bool force = false)
     {
         // MelonLoader re-reads the file after every save (ours included); only act on real changes.
-        var signature = string.Join("|", _autoReload.Value, _reloadKey.Value, _inputBackend.Value, string.Join(";", _extraWatchPaths.Value ?? Array.Empty<string>()));
+        var signature = string.Join("|", _autoReload.Value, _reloadKey.Value, _inputBackend.Value, _echoUnityErrors.Value, string.Join(";", _extraWatchPaths.Value ?? Array.Empty<string>()));
         if (!force && signature == _appliedConfig) return;
         _appliedConfig = signature;
+
+        if (!ErrorEcho.TryParse(_echoUnityErrors.Value, out var echoMode))
+            LoggerInstance.Warning("EchoUnityErrors = \"" + _echoUnityErrors.Value + "\" is not AfterReload, Always or Off; using AfterReload.");
+        _errorEcho.Current = echoMode;
 
         _keys.Configure(_reloadKey.Value ?? "F8", _inputBackend.Value ?? "Auto");
 
@@ -297,6 +311,11 @@ public class HotReloadPlugin : MelonPlugin
                     ?? info?.GetField("Version", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
         return v?.ToString() ?? typeof(MelonAssembly).Assembly.GetName().Version?.ToString() ?? "?";
     }
+
+    private string UnityErrorsDescription() =>
+        _unityErrorsStatus != "on" ? _unityErrorsStatus
+        : _errorEcho.Current == ErrorEcho.Mode.AfterReload ? "echoed after a reload"
+        : _errorEcho.Current == ErrorEcho.Mode.Always ? "echoed" : "not echoed (EchoUnityErrors = Off)";
 
     private static string ReinjectionStatus() =>
         Compat.IsMono ? "" : "; class re-injection: " + (InjectedTypes.Supported ? "on" : "off")

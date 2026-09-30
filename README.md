@@ -20,7 +20,9 @@ so the new one starts as if the game had just launched.
   callbacks that already fired, and can hand state over from the old build to the new one.
 * **Reloads what belongs together.** Mods that reference the changed one, and the helper libraries they use, reload with
   it. Plugins and `UserLibs` libraries reload too. UnityExplorer with UniverseLib reloads fully.
-* **Tells you what happened.** One log line per reload, and a clear message when a new build fails to load.
+* **Tells you what happened.** One log line per reload, and a clear message when a new build fails to load. Unity
+  errors and exceptions that show up after a reload, which normally reach only the game's `Player.log`, are copied
+  into the MelonLoader log, once each, with the reload they followed.
 
 ```
 [HotReload] Reloaded MyMod 1.2.0 -> 1.2.1 (Harmony: 6 method(s) unpatched, 6 patched; replayed 4 scene(s)) in 110 ms (from Mods\MyMod.dll)
@@ -60,8 +62,8 @@ version:
 * **Must:** stop threads you started yourself.
 * **Should:** keep `OnSceneWasLoaded` cheap. HotReload replays it for every open scene, which can be dozens.
 * **Should:** find your own objects in the scene instead of remembering them in static fields.
-* **Can:** hand state to the new build with `OnHotReloadSaveState` / `OnHotReloadRestoreState` (no reference to
-  HotReload needed).
+* **Can:** hand state to the new build with `OnHotReloadSaveState` / `OnHotReloadRestoreState`, and tell a reload
+  from a game start with the `HotReload.LoadingLate` flag (no reference to HotReload needed).
 
 **[The guide for mod authors](docs/writing-reloadable-mods.md)** explains each rule with code and shows how to test
 your mod's reload. `HotReloadCheck`
@@ -77,6 +79,7 @@ your mod's reload. `HotReloadCheck`
 | `ReloadKey` | `"F8"` | A Unity `KeyCode` name, or a chord like `"LeftControl+F8"`; `"None"` turns it off. |
 | `ExtraWatchPaths` | `[]` | Build folders or DLLs to watch besides the game's folders, e.g. your plugin's `bin/Release`. |
 | `Ignore` | `[]` | Assembly names never to reload. |
+| `EchoUnityErrors` | `"AfterReload"` | Copy Unity errors that are new since a reload into the MelonLoader log; `"Always"` or `"Off"`. |
 
 All settings: [docs/configuration.md](docs/configuration.md).
 

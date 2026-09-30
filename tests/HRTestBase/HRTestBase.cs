@@ -53,6 +53,14 @@ public class HRTestBaseMod : MelonMod
 
         LoggerInstance.Msg(Greeting() + ", init #" + cfg.InitCount + ", Assembly.Location='" + typeof(HRTestBaseMod).Assembly.Location + "'");
 
+        // Late-load flag (1.1): "reload" / "new" while HotReload loads this build into a running game, null at game start.
+        var late = System.AppDomain.CurrentDomain.GetData("HotReload.LoadingLate") as string;
+        LoggerInstance.Msg("HotReload.LoadingLate = " + (late ?? "(unset: game start)"));
+        // Unity error echo (1.1): an error every build logs is known from before the first reload and must not be echoed;
+        // a reloaded build's behaviour logs a new exception every 3 s, echoed once per reload with repeats counted.
+        Debug.LogError("HRTestBase: an error every build logs");
+        HRTestBehaviour.LogExceptions = late == "reload";
+
         // A library that refuses a second registration: works only if HotReload reloads the library too (0.7).
         HRTestLib.Registry.Register("hrtestbase");
 
@@ -180,6 +188,7 @@ public class HRTestBaseMod : MelonMod
 public class HRTestBehaviour : MonoBehaviour
 {
     public static string Build = "";
+    public static bool LogExceptions;
     private float _next;
 
 #if !MONO
@@ -191,5 +200,11 @@ public class HRTestBehaviour : MonoBehaviour
         if (Time.time < _next) return;
         _next = Time.time + 3f;
         MelonLogger.Msg("[HRTestBase] behaviour Update from " + Build);
+        if (LogExceptions)
+#if MONO
+            Debug.LogException(new System.InvalidOperationException("HRTestBase: deliberate exception from " + Build));
+#else
+            Debug.LogException(new Il2CppSystem.InvalidOperationException("HRTestBase: deliberate exception from " + Build));
+#endif
     }
 }

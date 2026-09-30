@@ -84,7 +84,8 @@ the Back button) silently stops working.
 it.** On load, also drop dead entries an older build may have left, so a broken session repairs itself on the next
 reload.
 
-Such exceptions usually show up in the game's own log, not in MelonLoader's (see [Testing](#testing-your-reload)).
+Such exceptions go to the game's own log, not to MelonLoader's. HotReload copies the ones that appear after a reload
+into its log (`Unity exception 3 s after reloading MyMod: ...`); see [Testing](#testing-your-reload).
 
 ### 5. Keep scene callbacks cheap
 
@@ -133,6 +134,22 @@ Code that only runs while the game starts (a plugin's `OnPreInitialization`, a p
 boot, a setting the game reads once) is not run again by a reload. Changes there still need a restart to test. Keep such
 code small and separate, so the rest of the mod stays reloadable.
 
+The opposite also happens: code meant to run once per game start (skip the intro, press Continue on the first main menu)
+must not run when the mod is loaded into a game that is already running. While HotReload loads a melon after startup,
+it sets an AppDomain flag you can read without referencing HotReload:
+
+```csharp
+public override void OnInitializeMelon()
+{
+    // "reload" (an earlier build ran), "new" (a DLL added while the game runs), or null at game start.
+    var loadedLate = AppDomain.CurrentDomain.GetData("HotReload.LoadingLate") as string;
+    if (loadedLate == null) ArmFirstMenuAutoContinue();
+}
+```
+
+The flag is set from the melon's constructor to the end of the reload (`OnEarlyInitializeMelon`, `OnInitializeMelon`,
+`OnHotReloadRestoreState`, the replayed scene callbacks) and cleared afterwards, so read it there and keep the answer.
+
 ### 9. Optional: hand state to the new build
 
 Static and instance fields start fresh. A melon can pass state to its next build without referencing HotReload:
@@ -164,9 +181,13 @@ classes.
   </PropertyGroup>
   ```
 
-* **Read the game's own log too.** Exceptions thrown inside game code, for example when the game calls something you
-  destroyed, go to Unity's `Player.log`, not to MelonLoader's log. On Windows it is in
-  `%USERPROFILE%\AppData\LocalLow\<company>\<game>\Player.log`.
+* **Watch for `Unity exception ... after reloading` lines.** Exceptions thrown inside game code, for example when the
+  game calls something you destroyed, go to Unity's `Player.log`. HotReload copies the ones that are new since a reload
+  into its log, once each with a repeat count ([`EchoUnityErrors`](configuration.md#unity-errors)). For the full text,
+  read `Player.log`; on Windows it is in `%USERPROFILE%\AppData\LocalLow\<company>\<game>\Player.log`.
+* **Deploy with a plain copy.** `Mods/` is shadow-copied, so a build can overwrite the DLL there while the game runs.
+  Moving the old DLL aside first (`*.hotreload-old`) is only needed for plugins and `UserLibs` libraries, which are
+  locked; for those, [`ExtraWatchPaths`](configuration.md) pointing at the build folder is simpler.
 * **Read HotReload's lines.** Each reload lists what was removed ("removed 3 patch(es)", "retired 12 old method(s)",
   "unloaded 1 AssetBundle(s)") and what failed. `Not running after the failed reload: MyMod` means the new build did not
   come up: fix it and copy it again, or press the reload key to retry.
@@ -194,4 +215,5 @@ classes.
 * Keep `OnSceneWasLoaded` cheap, or schedule the work.
 * Keep hooks and AssetBundles in fields, or dispose them yourself.
 * Stop your own threads.
-* Test with two reloads, stamp debug builds, and read `Player.log` as well.
+* Skip once-per-launch work when `HotReload.LoadingLate` is set.
+* Test with two reloads, stamp debug builds, and watch for Unity exceptions after a reload.

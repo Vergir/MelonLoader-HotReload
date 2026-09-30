@@ -29,6 +29,11 @@ For each assembly:
    are not run again.
 8. Saved state is handed to the new build, and scene callbacks are replayed for the scenes already open.
 
+From step 6 to the end of step 8 the AppDomain data `HotReload.LoadingLate` is `"reload"` (or `"new"` for a DLL added
+while the game runs), so a mod can tell a late load from a game start. After the group, Unity errors that are new are
+copied into the log with the reload they followed (`EchoUnityErrors`), because exceptions in game code otherwise reach
+only `Player.log`.
+
 **When a reload fails** (the new build does not load, or a melon fails to register because its `OnEarlyInitializeMelon`
 throws), HotReload names what is not running (`Not running after the failed reload: X`) and forgets its file hash, so the
 reload key or the next copy retries it. MelonLoader leaves the callbacks of a melon that failed to register subscribed;
@@ -112,4 +117,5 @@ warning at startup; the rest keeps working.
 | `src/PrefOwnership.cs`, `src/StateHandoff.cs` | Preferences; state handoff. |
 | `src/InjectedTypes.cs` | Il2Cpp class re-injection. |
 | `src/UnityApi.cs`, `src/KeyInput.cs`, `src/Callers.cs` | Unity by reflection; the reload key; which mod is calling. |
+| `src/UnityErrors.cs` | Unity's log callback; which errors to copy into the log. |
 | `src/Compat.cs` | Runtime detection, Cecil metadata and renaming. |
