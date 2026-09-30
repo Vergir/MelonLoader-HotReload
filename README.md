@@ -7,7 +7,8 @@ picks up the new build, without a restart. It works in any Unity game, Mono or I
 so the new one starts as if the game had just launched.
 
 **[Download the latest release](https://github.com/vergir/MelonLoader-HotReload/releases/latest/download/MelonLoader-HotReload.zip)**
-(one DLL for every game) · [all releases](https://github.com/vergir/MelonLoader-HotReload/releases)
+(one DLL for every game) · [all releases](https://github.com/vergir/MelonLoader-HotReload/releases) ·
+[Nexus Mods](https://www.nexusmods.com/site/mods/2376)
 
 ## Features
 
