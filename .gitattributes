@@ -1,1 +1,3 @@
-* text=auto
+# LF in every checkout, whatever the platform or core.autocrlf: line endings end up in the compiled DLLs (through the
+# PDB checksums), so this keeps a build from a clone identical to the released one.
+* text=auto eol=lf

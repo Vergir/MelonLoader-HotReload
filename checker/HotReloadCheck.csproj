@@ -11,5 +11,8 @@
     <!-- Same version as HotReload: a report says which HotReload it checks against. -->
     <Version>$(HotReloadVersion)</Version>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- No HotReloadCheck.exe launcher: run it with "dotnet HotReloadCheck.dll". The unsigned apphost stub from the SDK
+         is a common antivirus false positive, and the release then contains only managed code. -->
+    <UseAppHost>false</UseAppHost>
   </PropertyGroup>
 </Project>

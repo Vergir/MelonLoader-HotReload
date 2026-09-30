@@ -42,4 +42,40 @@ release with `MelonLoader-HotReload.zip` and `HotReloadCheck.zip`, and the notes
 `https://github.com/vergir/MelonLoader-HotReload/releases/latest/download/MelonLoader-HotReload.zip` always points at the
 newest release.
 
+## Reproducing a release
+
+Release builds are reproducible: the same commit built with the same .NET SDK gives byte-identical DLLs on any machine
+and in any folder. Every release's notes list the SDK, the commit and the SHA256 of each file inside the zips, so a
+release can be checked against the source:
+
+1. Install the .NET SDK version named in the release notes (any .NET 10 SDK builds it, but a different compiler
+   version can produce slightly different bytes). Check with `dotnet --version`.
+2. Clone the release's tag and build the zips:
+
+   ```bash
+   git clone --branch v1.1.1 https://github.com/vergir/MelonLoader-HotReload
+   cd MelonLoader-HotReload
+   pwsh ./package.ps1
+   ```
+
+   Or without PowerShell: `dotnet build HotReload.csproj -c Release -p:DeployToGame=false` (output in `bin/Release/`)
+   and `dotnet publish checker -c Release -o out` (output in `out/`).
+3. Compare `dist/SHA256SUMS.txt` with the list in the release notes, or hash the files yourself
+   (`sha256sum`, or `Get-FileHash` in PowerShell).
+
+What makes it reproducible: deterministic compilation, `ContinuousIntegrationBuild` recording the checkout path as `/_/`
+(`Directory.Build.props`), and `.gitattributes` giving every checkout LF line endings, which the compiler records
+through the PDB checksums. The zips themselves differ between builds (they carry file times); compare the files inside.
+
+What is in the release zips:
+
+| File | What it is |
+|---|---|
+| `Plugins/HotReload.dll`, `HotReload.pdb` | The plugin (managed code) and its debug symbols. |
+| `HotReloadCheck.dll`, `HotReloadCheck.pdb` | The checker (managed .NET 8 code) and its debug symbols. |
+| `HotReloadCheck.deps.json`, `HotReloadCheck.runtimeconfig.json` | .NET's dependency and runtime settings for the checker. |
+| `README.md`, `LICENSE` | Text. |
+
+Neither zip contains native code. Both DLLs decompile with any .NET decompiler (ILSpy, dnSpy).
+
 Testing in games: [testing.md](testing.md).

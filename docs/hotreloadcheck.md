@@ -4,12 +4,18 @@
 what the author would have to add. It only reads metadata: which APIs a mod calls, which types and fields it defines,
 which callbacks it overrides. It never loads or runs a mod.
 
-Download `HotReloadCheck.zip` from the [releases](https://github.com/vergir/MelonLoader-HotReload/releases) (needs the
-.NET 8 runtime), or build it from source:
+Download `HotReloadCheck.zip` from the [releases](https://github.com/vergir/MelonLoader-HotReload/releases), extract it,
+and run it with the [.NET 8 runtime](https://dotnet.microsoft.com/download/dotnet/8.0) (or newer):
 
 ```bash
-dotnet build checker -c Release
-dotnet checker/bin/Release/net8.0/HotReloadCheck.dll <dll-or-folder>... --md report.md --csv report.csv
+dotnet HotReloadCheck.dll <dll-or-folder>... --md report.md --csv report.csv
+```
+
+The zip holds only managed code (no `.exe` launcher). To build it from source instead:
+
+```bash
+dotnet publish checker -c Release -o out
+dotnet out/HotReloadCheck.dll <dll-or-folder>...
 ```
 
 Folders are searched recursively. `--libs` also lists DLLs without `[MelonInfo]`.

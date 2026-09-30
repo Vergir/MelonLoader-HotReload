@@ -5,7 +5,18 @@
     Test fixtures keep their own <Version>.
   -->
   <PropertyGroup>
-    <HotReloadVersion>1.1.0</HotReloadVersion>
+    <HotReloadVersion>1.1.1</HotReloadVersion>
     <HotReloadRepository>https://github.com/vergir/MelonLoader-HotReload</HotReloadRepository>
+  </PropertyGroup>
+
+  <!--
+    Reproducible Release builds: the same commit and .NET SDK give byte-identical DLLs on any machine, so anyone can
+    rebuild a release and compare hashes (docs/building.md, "Reproducing a release"). ContinuousIntegrationBuild makes
+    the compiler record the git checkout as /_/ instead of its local path, in the PDB path, the source paths and the
+    SourceLink map. Needs a git clone (the commit also goes into the informational version).
+  -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
   </PropertyGroup>
 </Project>

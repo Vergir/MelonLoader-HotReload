@@ -60,9 +60,12 @@ jobs:
             if ($m.Success -and $m.Groups[1].Value.Trim()) { $notes = $m.Groups[1].Value.Trim() }
           }
           $assets = Get-ChildItem dist -Filter *.zip | ForEach-Object FullName
-          if ($notes) {
-            Set-Content release-notes.md $notes
-            gh release create "${{ github.ref_name }}" @assets --title "HotReload $env:HOTRELOAD_VERSION" --notes-file release-notes.md
-          } else {
-            gh release create "${{ github.ref_name }}" @assets --title "HotReload $env:HOTRELOAD_VERSION" --generate-notes
-          }
+          # Reproducible builds: the SDK, commit and file hashes a rebuild from this tag should match.
+          $sums = Get-Content dist/SHA256SUMS.txt
+          $verify = "## Verifying this release`n`n" + $sums[0].TrimStart('#', ' ') + ". The DLLs are reproducible: " +
+                    "a Release build of this tag with the same .NET SDK gives the same files " +
+                    "([how](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/building.md#reproducing-a-release)). " +
+                    "SHA256 of the files inside the zips:`n`n``````n" + (($sums | Select-Object -Skip 1) -join "`n") + "`n``````"
+          if (-not $notes) { $notes = "" }
+          Set-Content release-notes.md (($notes + "`n`n" + $verify).Trim())
+          gh release create "${{ github.ref_name }}" @assets --title "HotReload $env:HOTRELOAD_VERSION" --notes-file release-notes.md
