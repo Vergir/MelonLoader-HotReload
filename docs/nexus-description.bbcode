@@ -1,0 +1,52 @@
+[size=5][b]HotReload for MelonLoader[/b][/size]
+
+A tool for mod authors: rebuild your mod and the running game picks up the new build, without a restart. HotReload is a MelonLoader plugin for any Unity game, Mono or IL2CPP. It cleans up after the old build, so the new one starts as if the game had just launched.
+
+[size=4][b]Features[/b][/size]
+[list]
+[*][b]Reload on build:[/b] copy a new build into [i]Mods[/i] while the game runs, and HotReload reloads it a moment later. Mod DLLs are never locked, so your build's copy step just works. Or press [b]F8[/b]. Several DLLs at once load in MelonLoader's own order, one per frame. [b]Shift+F8[/b] reloads the last mod again without a new build, to test its unload code.
+[*][b]Cleans up the old build:[/b] Harmony patches (from any Harmony instance), MelonLoader callbacks and event handlers, preference categories, coroutines, timers and other callbacks the game still holds, objects kept across scenes, textures, materials and other assets it created, injected Il2Cpp classes, AssetBundles, and MonoMod hooks. A mod that saves only in OnApplicationQuit gets to save before a reload too.
+[*][b]Starts the new build properly:[/b] replays the scene callbacks for the scenes already open, calls the start callbacks that already fired, and can hand state over from the old build to the new one.
+[*][b]Reloads what belongs together:[/b] mods that reference the changed one, and the helper libraries they use. Plugins and UserLibs libraries reload too. UnityExplorer with UniverseLib reloads fully.
+[*][b]Tells you what happened:[/b] one log line per reload, and a clear message when a new build fails to load. Unity errors and exceptions that show up after a reload, which normally reach only the game's Player.log, are copied into the MelonLoader log, once each, with the reload they followed.
+[*][b]Optional extras:[/b] a reference-free API for tools that load or switch mods, and flags that tell a mod whether it is loaded into a running game or taken down for a reload.
+[/list]
+
+[size=4][b]Requirements[/b][/size]
+[list]
+[*][url=https://github.com/LavaGang/MelonLoader/releases]MelonLoader[/url] 0.6.0 or newer; 0.7.1 or newer recommended (keeps mod DLLs unlocked while the game runs).
+[*]An IL2CPP game, or a Mono game on Unity 2018.1 or newer. One DLL for both.
+[/list]
+
+[size=4][b]Installation[/b][/size]
+[list=1]
+[*]Install MelonLoader into the game folder and start the game once.
+[*]Extract the zip into the game folder, so that [i]HotReload.dll[/i] ends up in the [i]Plugins[/i] folder (not [i]Mods[/i]).
+[/list]
+
+[b]Steam Deck / Linux (Proton):[/b] the same, with MelonLoader's launch option [code]WINEDLLOVERRIDES="version=n,b" %command%[/code] Bind a back grip to F8 in the game's Steam Input layout to use the reload key.
+
+[size=4][b]Quick start[/b][/size]
+[list=1]
+[*]Start the game. The MelonLoader log shows what HotReload could enable.
+[*]Build your mod and copy the DLL (and its .pdb) into [i]Mods[/i], as your build probably already does.
+[*]The mod reloads. [b]F8[/b] reloads every DLL that changed, if automatic reloading is off or a change was missed.
+[/list]
+Plugins and UserLibs libraries are locked while the game runs: add your project's build folder to [i]ExtraWatchPaths[/i] in the settings, and HotReload reloads them straight from there.
+
+[size=4][b]Making your mod reload cleanly[/b][/size]
+Most mods reload as they are. For the rest, the GitHub page has a guide for mod authors: undo what you changed outside Harmony, set things up for what already exists after a reload, unregister your objects from game lists before destroying them, keep scene callbacks cheap, and a few more rules, with code and a checklist. The included [i]HotReloadCheck[/i] tool scans compiled mods and lists what they would need.
+
+[size=4][b]Settings[/b][/size]
+[i]UserData/HotReload.toml[/i], created on the first start; edits apply while the game runs. Automatic reload on or off, the reload key and the force-reload key (chords such as LeftControl+F8 work), extra folders to watch, assemblies to ignore, and switches for each kind of cleanup.
+
+[size=4][b]Compatibility[/b][/size]
+[list]
+[*]MelonLoader 0.6.0 to 0.7.3, checked against each release on every build.
+[*]Tested in No Rest for the Wicked (IL2CPP) on Windows and on a Steam Deck, and in PEAK (Mono).
+[*]A developer tool: it changes nothing in the game itself, and does nothing until a mod DLL changes or you press the reload key.
+[/list]
+
+[size=4][b]Source[/b][/size]
+Source code, the guide for mod authors, documentation and issue tracker: [url=https://github.com/Vergir/MelonLoader-HotReload]https://github.com/Vergir/MelonLoader-HotReload[/url]
+License: MIT

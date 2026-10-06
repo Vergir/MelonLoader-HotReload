@@ -1,0 +1,1 @@
+A MelonLoader plugin for mod authors: rebuild your mod and the running game reloads it, no restart. Any Unity game, Mono or IL2CPP. Cleans up the old build so the new one starts fresh.
