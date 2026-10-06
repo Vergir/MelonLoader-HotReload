@@ -85,7 +85,38 @@ public class HRTestBaseMod : MelonMod
         _timer = new System.Threading.Timer(_ => MelonLogger.Msg("[HRTestBase] timer from " + build), null, 3000, 3000);
         LoadBundles();
         InstallHooks();
+
+        // Created objects (1.2): one texture kept in a field, one dropped; HotReload destroys both on reload (DestroyOldAssets).
+        _keptTexture = new Texture2D(4, 4) { name = "HRTestBase_TexKept" };
+        new Texture2D(4, 4) { name = "HRTestBase_TexDropped" };
+        SubscribeToApi();
+        if (System.IO.File.Exists(System.IO.Path.Combine(MelonEnvironment.UserDataDirectory, "HRTestBlockInput")))
+        {
+            // Another mod blocking legacy input (1.2): the reload key must still work.
+            new HarmonyLib.Harmony("hrtest.blockinput").Patch(AccessTools.Method(AccessTools.TypeByName("UnityEngine.Input"), "GetKeyDown", new[] { AccessTools.TypeByName("UnityEngine.KeyCode") }),
+                prefix: new HarmonyMethod(typeof(HRTestBaseMod), nameof(BlockKey)));
+            LoggerInstance.Msg("blocking Input.GetKeyDown(KeyCode)");
+        }
     }
+
+    private static bool BlockKey(ref bool __result) { __result = false; return false; }
+
+    private static Texture2D? _keptTexture;
+
+    // Public API (1.2), by reflection as the docs show.
+    private void SubscribeToApi()
+    {
+        var api = System.AppDomain.CurrentDomain.GetAssemblies().FirstOrDefault(a => a.GetName().Name == "HotReload")?.GetType("HotReload.Api");
+        if (api == null) { LoggerInstance.Msg("HotReload.Api not found"); return; }
+        var build = Greeting();
+        api.GetEvent("Reloaded")!.AddEventHandler(null, new System.Action<string>(n => MelonLogger.Msg("[HRTestBase] API Reloaded(" + n + ") seen by " + build)));
+        api.GetEvent("BatchFinished")!.AddEventHandler(null, new System.Action(() => MelonLogger.Msg("[HRTestBase] API BatchFinished seen by " + build)));
+        LoggerInstance.Msg("HotReload.Api " + api.GetProperty("Version")!.GetValue(null) + ", AutoReload=" + api.GetProperty("AutoReload")!.GetValue(null));
+    }
+
+    // Quit fallback (1.2): no OnDeinitializeMelon here, so HotReload calls this on reload.
+    public override void OnApplicationQuit() =>
+        LoggerInstance.Msg("OnApplicationQuit from " + Greeting() + ", HotReload.Unloading = " + (System.AppDomain.CurrentDomain.GetData("HotReload.Unloading") as string ?? "(unset: game quit)"));
 
     // AssetBundles (step 4): the test deploy extracts two bundles into UserData. One is kept in a field, one is loaded
     // and dropped; a reload must unload both, or loading them again fails.
@@ -168,6 +199,8 @@ public class HRTestBaseMod : MelonMod
         {
             int n = Resources.FindObjectsOfTypeAll<GameObject>().Count(g => g.name == PersistentName);
             LoggerInstance.Msg(PersistentName + " objects alive: " + n);
+            LoggerInstance.Msg("HRTestBase textures alive: " + Resources.FindObjectsOfTypeAll<Texture2D>().Count(t => t.name.StartsWith("HRTestBase_Tex")) +
+                               ", HRTestBase_Behaviour objects: " + Resources.FindObjectsOfTypeAll<GameObject>().Count(g => g.name == "HRTestBase_Behaviour"));
             LoggerInstance.Msg("HRTestBehaviour instances alive: " + Resources.FindObjectsOfTypeAll(
 #if MONO
                 typeof(HRTestBehaviour)

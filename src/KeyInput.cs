@@ -34,7 +34,13 @@ internal sealed class KeyInput
     private bool[] _vkWasDown = Array.Empty<bool>();
     private IntPtr _window;
 
-    public KeyInput(MelonLogger.Instance log) => _log = log;
+    private readonly string _label;
+
+    public KeyInput(MelonLogger.Instance log, string label = "Reload key")
+    {
+        _log = log;
+        _label = label;
+    }
 
     public string Describe() => _backend switch
     {
@@ -80,7 +86,7 @@ internal sealed class KeyInput
         {
             return _backend switch
             {
-                Backend.Legacy => LegacyPressed(),
+                Backend.Legacy => UnityApi.LegacyInputBlocked() ? BlockedLegacyPressed() : LegacyPressed(),
                 Backend.InputSystem => InputSystemPressed(),
                 Backend.Windows => WindowsPressed(),
                 _ => false,
@@ -128,9 +134,9 @@ internal sealed class KeyInput
             else notes.Add(b + ": " + why);
         }
         if (_backend == Backend.None)
-            _log.Warning("Reload key " + _keyName + " unavailable (" + string.Join("; ", notes) + "). Auto reload still works.");
+            _log.Warning(_label + " " + _keyName + " unavailable (" + string.Join("; ", notes) + "). Auto reload still works.");
         else if (failed != Backend.None || notes.Count > 0)
-            _log.Msg("Reload key " + Describe() + (notes.Count > 0 ? " [" + string.Join("; ", notes) + "]" : ""));
+            _log.Msg(_label + " " + Describe() + (notes.Count > 0 ? " [" + string.Join("; ", notes) + "]" : ""));
     }
 
     // ---- Legacy UnityEngine.Input ---------------------------------------------------------------------------------
@@ -146,6 +152,27 @@ internal sealed class KeyInput
             return UnityApi.LegacyInputProblem();
         }
         catch (Exception e) { return e.GetBaseException().Message; }
+    }
+
+    // While another mod blocks legacy input on IL2CPP: the Windows key state (also under Proton), else the Input System.
+    private Backend _whileBlocked = Backend.None;
+    private bool _blockedSetUp;
+
+    private bool BlockedLegacyPressed()
+    {
+        if (!_blockedSetUp)
+        {
+            _blockedSetUp = true;
+            _whileBlocked = TrySetupWindows() == null ? Backend.Windows : TrySetupInputSystem() == null ? Backend.InputSystem : Backend.None;
+            _log.Msg("Another mod patched UnityEngine.Input; while it does, " + _label.ToLowerInvariant() + " " + _keyName + " is read " +
+                     (_whileBlocked == Backend.Windows ? "from the Windows key state." : _whileBlocked == Backend.InputSystem ? "through the Input System." : "through legacy input anyway (no other way here) and may not work."));
+        }
+        return _whileBlocked switch
+        {
+            Backend.Windows => WindowsPressed(),
+            Backend.InputSystem => InputSystemPressed(),
+            _ => LegacyPressed(),
+        };
     }
 
     private bool LegacyPressed() =>
@@ -257,13 +284,29 @@ internal sealed class KeyInput
         var tapped = new bool[_vks.Length];
         for (int i = 0; i < _vks.Length; i++)
         {
-            short state = GetAsyncKeyState(_vks[i]);
+            short state = KeyState(_vks[i]);
             down[i] = (state & 0x8000) != 0;
             tapped[i] = (state & 1) != 0;
         }
         var was = _vkWasDown;
         _vkWasDown = down;
         return ChordPressed(down.Length, i => down[i] || tapped[i], i => (down[i] && !was[i]) || (tapped[i] && !down[i])) && GameHasFocus();
+    }
+
+    // The reload key and the force-reload key may share keys, and reading GetAsyncKeyState clears the "pressed since the
+    // last query" bit: each key is read once per frame and the value is shared.
+    private static int _frame;
+    private static readonly Dictionary<int, (int frame, short state)> States = new Dictionary<int, (int, short)>();
+
+    /// <summary>Call once per frame before reading keys.</summary>
+    public static void NextFrame() => _frame++;
+
+    private static short KeyState(int vk)
+    {
+        if (States.TryGetValue(vk, out var s) && s.frame == _frame) return s.state;
+        short state = GetAsyncKeyState(vk);
+        States[vk] = (_frame, state);
+        return state;
     }
 
     private bool GameHasFocus()

@@ -13,14 +13,19 @@ so the new one starts as if the game had just launched.
 ## Features
 
 * **Reload on build.** Copy a new build into `Mods/` while the game runs; HotReload reloads it a moment later.
-  `Mods/` DLLs are never locked, so your build's copy step just works. Or press **F8**.
+  `Mods/` DLLs are never locked, so your build's copy step just works. Or press **F8**. Several DLLs at once load in
+  MelonLoader's own order, one per frame. **Shift+F8** reloads the last mod again without a new build, to test its
+  unload code.
 * **Cleans up the old build.** Harmony patches (from any Harmony instance), MelonLoader callbacks and event handlers,
   preference categories, coroutines, timers and other callbacks the game still holds, objects kept across scenes,
-  injected Il2Cpp classes, AssetBundles, and hooks made outside Harmony that the mod keeps in a field.
+  textures, materials and other assets it created, injected Il2Cpp classes, AssetBundles, and MonoMod hooks. A mod that
+  saves only in `OnApplicationQuit` gets to save before a reload too.
 * **Starts the new build properly.** It replays the scene callbacks for the scenes already open, calls the start
   callbacks that already fired, and can hand state over from the old build to the new one.
 * **Reloads what belongs together.** Mods that reference the changed one, and the helper libraries they use, reload with
   it. Plugins and `UserLibs` libraries reload too. UnityExplorer with UniverseLib reloads fully.
+* **Optional extras.** A reference-free API for tools that load or switch mods (`HotReload.Api`), and flags that tell
+  a mod whether it is loaded into a running game or taken down for a reload.
 * **Tells you what happened.** One log line per reload, and a clear message when a new build fails to load. Unity
   errors and exceptions that show up after a reload, which normally reach only the game's `Player.log`, are copied
   into the MelonLoader log, once each, with the reload they followed.
@@ -57,7 +62,8 @@ Most mods reload as they are. HotReload removes what it can find; a few things o
 version:
 
 * **Must:** in `OnDeinitializeMelon`, undo what you changed in the game outside Harmony (object properties, UI you added,
-  hooks or bundles you did not keep in a field), and unregister your objects from game lists before you destroy them.
+  native hooks or bundles you did not keep in a field), and unregister your objects from game lists before you destroy
+  them.
 * **Must:** in `OnInitializeMelon`, set things up for what is already there. The game has already started, and one-time
   events (a menu being built, a save being loaded) will not fire again for the new build.
 * **Must:** stop threads you started yourself.
@@ -78,6 +84,7 @@ your mod's reload. `HotReloadCheck`
 |---|---|---|
 | `AutoReload` | `true` | Reload as soon as a DLL changes; `false` = only the reload key. |
 | `ReloadKey` | `"F8"` | A Unity `KeyCode` name, or a chord like `"LeftControl+F8"`; `"None"` turns it off. |
+| `ForceReloadKey` | `"LeftShift+F8"` | Reloads the mods of the last reload even when their DLL did not change. |
 | `ExtraWatchPaths` | `[]` | Build folders or DLLs to watch besides the game's folders, e.g. your plugin's `bin/Release`. |
 | `Ignore` | `[]` | Assembly names never to reload. |
 | `EchoUnityErrors` | `"AfterReload"` | Copy Unity errors that are new since a reload into the MelonLoader log; `"Always"` or `"Off"`. |

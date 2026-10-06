@@ -14,12 +14,21 @@ You do not need any code for these:
 * **Callbacks the game still holds** (UI listeners, Il2Cpp delegates, timers, tasks, event handlers) and **coroutines**
   are turned into no-ops, so old code does not run against state that is gone.
 * **Objects you passed to `DontDestroyOnLoad`** are destroyed, and so are live instances of your injected Il2Cpp classes
-  and your `MonoBehaviour`s. Your classes can be injected again by the new build.
+  and your `MonoBehaviour`s. Your classes can be injected again by the new build. You do not need to destroy them
+  yourself; do it only if you also reset state that points at them.
+* **Textures, materials, meshes, sprites and ScriptableObjects** your code created are destroyed
+  ([`DestroyOldAssets`](configuration.md)). GameObjects you created with `new GameObject` can be too, if the user turns on
+  `DestroyOldGameObjects`.
 * **AssetBundles** you keep in a field, or loaded through `AssetBundle.LoadFrom*`, are unloaded.
-* **Hooks made outside Harmony** (MonoMod, MelonLoader's `NativeHook`) that you keep in a field are disposed.
+* **MonoMod hooks** (`Hook`, `Detour`, `ILHook`) are disposed, kept in a field or not. MelonLoader's `NativeHook` and
+  MonoMod's `NativeDetour` are disposed when you keep them in a field.
+* **Saving on quit**: if your melon has `OnApplicationQuit` but no `OnDeinitializeMelon`, its `OnApplicationQuit` runs
+  before a reload too ([`CallQuitOnUnload`](configuration.md)).
 * **Libraries** in `UserLibs` that your mod uses reload with it, so state you registered with them starts fresh.
 * **Scene callbacks** `OnSceneWasLoaded` and `OnSceneWasInitialized` are replayed for the scenes already open, and
   start callbacks that already fired (`OnApplicationStart`, a plugin's `OnApplicationStarted`) are called.
+* **Several mods changing at once** (a build of a whole solution, a tool that switches mods on and off) load in the order
+  MelonLoader uses at startup, one per frame.
 
 ## The rules
 
@@ -59,13 +68,27 @@ and properties of game objects, UI styles and scales, controls you added.
 the original values while your mod runs so you can put them back. Some changes are harmless to leave (a flag the new
 build sets to the same value); decide per change.
 
+MelonLoader also calls `OnDeinitializeMelon` when the game quits. Keep it safe and cheap there, or tell the cases apart:
+while HotReload takes your build down, the AppDomain data `HotReload.Unloading` is `"reload"` or `"unload"`; at game quit
+it is unset.
+
+```csharp
+public override void OnDeinitializeMelon()
+{
+    if (AppDomain.CurrentDomain.GetData("HotReload.Unloading") == null) return; // the game is quitting
+    RestoreEverything();
+}
+```
+
 ### 3. Find your objects instead of remembering them
 
-A new build starts with empty static fields. If your mod remembers the controls it added in a static list, the new
-build thinks none exist and adds them again. Games often key their UI elements by id in a dictionary, so adding the same
+A new build starts with empty static fields. Your old build's own `OnDeinitializeMelon` still sees its fields, so it can
+remove what it remembered; the trouble starts when that cleanup misses something, or when it was written after the build
+that is running. If your mod only remembers the controls it added in a static list, the new build thinks none exist and
+adds them again. Games often key their UI elements by id in a dictionary, so adding the same
 id twice can also throw halfway, after the element was already created, and leave a broken, empty element behind.
 
-**Find your own objects in the scene.** Give them a recognisable name and look them up by it; before adding an element
+**Find your own objects in the scene as well.** Give them a recognisable name and look them up by it; before adding an element
 the game registers by id, remove your ids from the game's registry.
 
 ```csharp
@@ -83,6 +106,10 @@ the Back button) silently stops working.
 **If the game can reach your object, remove it from every game list and cached field that holds it before you destroy
 it.** On load, also drop dead entries an older build may have left, so a broken session repairs itself on the next
 reload.
+
+A mod that hosts other mods' objects (moves their settings rows into its own tab, say) cannot rely on their cleanup,
+which looks where it put them. Subscribe to MelonLoader's `MelonBase.OnMelonUnregistered` and remove an unregistered
+mod's objects right away.
 
 Such exceptions go to the game's own log, not to MelonLoader's. HotReload copies the ones that appear after a reload
 into its log (`Unity exception 3 s after reloading MyMod: ...`); see [Testing](#testing-your-reload).
@@ -108,17 +135,18 @@ public override void OnUpdate()
 }
 ```
 
-### 6. Keep hooks and bundles in fields
+### 6. Keep native hooks and bundles in fields
 
-HotReload disposes MonoMod hooks and `NativeHook`s, and unloads AssetBundles, that your mod keeps in a field (static, or
-an instance field of your melon, also inside a list or dictionary). A hook created and forgotten stays active and keeps
-calling your old build's handler until the game restarts; HotReload names the method that creates it in the log. A
-bundle loaded and forgotten is only found where HotReload could track the load, which some IL2CPP games prevent by
-stripping the load method.
+HotReload disposes MonoMod's `Hook`, `Detour` and `ILHook` wherever you keep them. MelonLoader's `NativeHook` and
+MonoMod's `NativeDetour` carry no handler HotReload can trace, so it finds them only in a field (static, or an instance
+field of your melon, also inside a list or dictionary); one created and forgotten stays active and keeps calling your old
+build's handler until the game restarts, and HotReload names the method that creates it in the log. AssetBundles are
+unloaded when kept in a field, or when HotReload could track the load, which some IL2CPP games prevent by stripping the
+load method.
 
 ```csharp
-private static Hook? _hook;             // found and disposed on reload
-private static AssetBundle? _bundle;    // found and unloaded on reload
+private static NativeHook<MyDelegate>? _hook;  // found and detached on reload
+private static AssetBundle? _bundle;           // found and unloaded on reload
 ```
 
 Or dispose and unload them yourself in `OnDeinitializeMelon`.
@@ -164,16 +192,42 @@ private void OnHotReloadRestoreState(object state) =>          // new build, aft
     _count = (int)((Dictionary<string, object>)state)["count"];
 ```
 
-Melons are matched by name. Use framework types only (numbers, strings, arrays, `List` / `Dictionary` of those, or a JSON
+Melons are matched by name. The state also survives an unload: when a mod's DLL is removed and later comes back in
+the same session, the new build gets what the last one saved. Use framework types only (numbers, strings, arrays, `List` / `Dictionary` of those, or a JSON
 string): the old and new builds are different assemblies, so the new build cannot cast an object of the old build's
 classes.
+
+### 10. Optional: HotReload's API
+
+A mod that loads or switches other mods, or wants to know when they reload, can use `HotReload.Api`. Reach it by
+reflection, so the mod also runs without HotReload:
+
+```csharp
+var api = AppDomain.CurrentDomain.GetAssemblies()
+    .FirstOrDefault(a => a.GetName().Name == "HotReload")?.GetType("HotReload.Api");
+// Rename several DLLs, then process them as one batch, in load order, one per frame:
+api?.GetMethod("Queue", new[] { typeof(string[]) })?.Invoke(null, new object[] { paths });
+api?.GetEvent("BatchFinished")?.AddEventHandler(null, new Action(OnModsSwitched));
+```
+
+| Member | What |
+|---|---|
+| `Version`, `IsRunning`, `AutoReload`, `Busy` | HotReload's version; whether it runs; whether file changes reload on their own; whether a batch is still waiting. |
+| `Process(string path)` | Load, reload or unload the DLL at `path` now. Returns `"Reloaded"`, `"Unloaded"`, `"Unchanged"`, `"Skipped"`, `"NotReady"` or `"Failed"`. |
+| `Queue(string[] paths)` | Add files to the current batch, without waiting for the file watcher. |
+| `Reloaded`, `Unloaded` (`Action<string>`) | A melon assembly or library was loaded into the running game / a mod was unloaded; the assembly name. |
+| `BatchFinished` (`Action`) | Every file of the batch has been processed. |
+
+Handlers of a build that is reloaded or unloaded are removed by HotReload.
 
 ## Testing your reload
 
 * **Reload twice.** The first reload into a fixed build runs the *old* build's `OnDeinitializeMelon`; only the second
   one runs your new unload code.
-* **Force a reload of identical code.** A rebuild without changes produces the same bytes, and HotReload skips unchanged
-  DLLs. Stamp debug builds so every build differs:
+* **Force a reload of identical code** with the force-reload key (`LeftShift+F8`): it reloads the mods of the last
+  reload with the same bytes, so you can run your unload code again without a new build. A rebuild without changes
+  produces the same bytes, and HotReload skips unchanged DLLs; to reload on every build instead, stamp debug builds so
+  every build differs:
 
   ```xml
   <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
@@ -198,7 +252,10 @@ classes.
 * Undo changes your mod made to the game outside Harmony (rule 2).
 * Stop a loop that is already running on your own thread (rule 7).
 * Re-run code that only runs at game start (rule 8).
-* Find hooks and bundles that are not kept in a field (rule 6), or objects your mod made that the game still holds (rule 4).
+* Find `NativeHook`s, `NativeDetour`s and bundles that are not kept in a field (rule 6), or objects your mod made that
+  the game still holds (rule 4).
+* Bring back an asset the old build handed to the game for good: it is destroyed with the old build
+  (`DestroyOldAssets`), so set it again from `OnInitializeMelon`.
 * Update UI the old build added to a screen that stays open: the old controls call retired code and do nothing until the
   game rebuilds that screen, so rebuild them from `OnInitializeMelon` (rule 1).
 * Free memory: each old build stays loaded, about the DLL's size per reload. Restart the game after many reloads.
@@ -213,7 +270,8 @@ classes.
 * Find your own objects by name, not through static fields.
 * Unregister your objects from game lists before destroying them; clean up dead entries on load.
 * Keep `OnSceneWasLoaded` cheap, or schedule the work.
-* Keep hooks and AssetBundles in fields, or dispose them yourself.
+* Keep `NativeHook`s and AssetBundles in fields, or dispose them yourself.
+* Keep `OnDeinitializeMelon` cheap at game quit (`HotReload.Unloading` is unset then).
 * Stop your own threads.
 * Skip once-per-launch work when `HotReload.LoadingLate` is set.
 * Test with two reloads, stamp debug builds, and watch for Unity exceptions after a reload.

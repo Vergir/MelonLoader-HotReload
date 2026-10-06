@@ -35,6 +35,10 @@ internal sealed class ErrorEcho
     private readonly Dictionary<string, Entry> _shown = new Dictionary<string, Entry>(StringComparer.Ordinal);
     private string? _lastReload;
     private DateTime _lastReloadAt;
+    // Reloads and unloads of the last 30 s, newest last: an error after a batch may come from any of them.
+    private readonly List<(string what, DateTime at)> _recent = new List<(string, DateTime)>();
+    private static readonly TimeSpan RecentWindow = TimeSpan.FromSeconds(30);
+    private const int MaxEarlierNamed = 3;
     private bool _hintShown, _capNoted;
 
     public ErrorEcho(Action<string> print) => _print = print;
@@ -55,6 +59,8 @@ internal sealed class ErrorEcho
         Flush(now, force: true);
         _lastReload = what;
         _lastReloadAt = now;
+        _recent.Add((what, now));
+        _recent.RemoveAll(r => now - r.at > RecentWindow);
         _shown.Clear();
         _capNoted = false;
     }
@@ -116,11 +122,18 @@ internal sealed class ErrorEcho
 
     private string Since(DateTime now)
     {
-        var d = now - _lastReloadAt;
-        var ago = d.TotalSeconds < 60 ? d.TotalSeconds.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + " s"
-            : d.TotalMinutes < 60 ? (int)d.TotalMinutes + " min" : (int)d.TotalHours + " h";
-        return ago + " after " + _lastReload;
+        var text = Ago(now - _lastReloadAt) + " after " + _lastReload;
+        // Other mods only, newest first: the same mod reloaded again is not news.
+        var earlier = _recent.Where(r => now - r.at <= RecentWindow && r.what != _lastReload).Reverse()
+            .GroupBy(r => r.what).Select(g => g.First()).ToList();
+        if (earlier.Count == 0) return text;
+        return text + " (earlier: " + string.Join(", ", earlier.Take(MaxEarlierNamed).Select(r => r.what + " " + Ago(now - r.at) + " ago").ToArray())
+               + (earlier.Count > MaxEarlierNamed ? " and " + (earlier.Count - MaxEarlierNamed) + " more" : "") + ")";
     }
+
+    private static string Ago(TimeSpan d) =>
+        d.TotalSeconds < 60 ? d.TotalSeconds.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + " s"
+        : d.TotalMinutes < 60 ? (int)d.TotalMinutes + " min" : (int)d.TotalHours + " h";
 
     private static string Kind(int logType) =>
         logType == LogException ? "Unity exception" : logType == LogAssert ? "Unity assert" : "Unity error";

@@ -208,7 +208,7 @@ internal static class StartupLoader
     }
 
     /// <summary>One-line self-test for the log.</summary>
-    public static string Describe()
+    public static string Describe(bool patchWanted)
     {
         if (_shadowDir == null) return "Mods/ not shadow-copied; mod DLLs are locked while the game runs.";
         foreach (var ma in MelonAssembly.LoadedAssemblies)
@@ -216,7 +216,7 @@ internal static class StartupLoader
             if (!Locations.TryGetValue(ma.Assembly, out var expected)) continue;
             var reported = ma.Assembly.Location;
             return Shadowed + " mod(s) loaded from shadow copies; Mods/*.dll stay unlocked. Assembly.Location "
-                   + (reported == expected ? "reports the Mods/ path" : _locationPatched ? "patch NOT effective ('" + reported + "')" : "shows the shadow path (patch failed)");
+                   + (reported == expected ? "reports the Mods/ path" : _locationPatched ? "patch NOT effective ('" + reported + "')" : "shows the shadow path (" + (patchWanted ? "patch failed" : "PatchAssemblyLocation off") + ")");
         }
         return Shadowed + " mod(s) loaded from shadow copies; Mods/*.dll stay unlocked.";
     }

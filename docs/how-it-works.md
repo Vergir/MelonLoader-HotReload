@@ -4,6 +4,13 @@ What a reload does, and which MelonLoader, runtime and Unity details HotReload r
 
 ## A reload, step by step
 
+**Batches.** File changes that become due together form a batch, processed in the order MelonLoader loads mods at
+startup: removed DLLs first (they only unload), then what an assembly depends on (references,
+`[MelonAdditionalDependencies]`, `[MelonOptionalDependencies]`), then lower `[MelonPriority]`, then the name. One reload or
+unload runs per frame, so a batch does not freeze the game. A DLL renamed into place is complete at once and is due after
+100 ms; any other change waits for `DebounceMs` of quiet, and a removed DLL keeps that wait so "move the old DLL aside,
+copy the new one" stays one reload.
+
 A change reloads a **group**: the changed assembly, the loaded mods and libraries that reference it, and (with
 `FreshLibraries`) the stateful libraries those mods use. For example:
 `Reloading together: HRTestLib (library used by HRTestBase), HRTestBase (changed), HRTestDependent (references HRTestBase)`.
@@ -11,13 +18,17 @@ The group goes down dependents first and comes up libraries first, so every mod 
 
 For each assembly:
 
-0. The old build's state is saved if it opts in (`OnHotReloadSaveState`).
+0. The old build's state is saved if it opts in (`OnHotReloadSaveState`). A melon that overrides `OnApplicationQuit` but
+   not `OnDeinitializeMelon` gets its `OnApplicationQuit` called (`CallQuitOnUnload`).
 1. `MelonAssembly.UnregisterMelons`: the mod's `OnDeinitializeMelon` runs, its MelonLoader callbacks are unsubscribed, and
-   its `HarmonyInstance` is unpatched.
+   its `HarmonyInstance` is unpatched. During steps 0 and 1 the AppDomain data `HotReload.Unloading` is `"reload"` (or
+   `"unload"` when its DLL was removed); it is unset when MelonLoader calls `OnDeinitializeMelon` at game quit.
 2. Every remaining Harmony patch whose patch method lives in the old assembly is removed, whatever Harmony instance made
    it, and so is every MelonLoader event handler it declares.
-3. Hooks outside Harmony that the old build keeps in its fields are disposed. Objects it kept across scenes, live
-   instances of its injected Il2Cpp classes (or, on Mono, its components) are destroyed, and its AssetBundles unloaded.
+3. Hooks outside Harmony are disposed: those the old build keeps in its fields, and the MonoMod hooks whose handler is in
+   the old build. Objects it kept across scenes, live instances of its injected Il2Cpp classes (or, on Mono, its
+   components), and the textures, materials, sprites and ScriptableObjects it created are destroyed, and its AssetBundles
+   unloaded.
 4. The old build is retired (below), and its injected class names are released so the new build can inject them again.
 5. Its preference categories are saved and released, so the new build can create them again with the saved values.
 6. The new DLL is copied, with its `.pdb`, into this session's shadow folder and loaded from there: on IL2CPP into its own
@@ -33,6 +44,10 @@ From step 6 to the end of step 8 the AppDomain data `HotReload.LoadingLate` is `
 while the game runs), so a mod can tell a late load from a game start. After the group, Unity errors that are new are
 copied into the log with the reload they followed (`EchoUnityErrors`), because exceptions in game code otherwise reach
 only `Player.log`.
+
+**Unload and load again.** When a DLL is removed, its mod is taken down the same way (steps 0 to 5) and unloaded. Its
+saved state and version are kept for the session: if the DLL comes back, the load counts as a reload ("back after an
+unload", `LoadingLate = "reload"`, state handed over).
 
 **When a reload fails** (the new build does not load, or a melon fails to register because its `OnEarlyInitializeMelon`
 throws), HotReload names what is not running (`Not running after the failed reload: X`) and forgets its file hash, so the
@@ -51,8 +66,9 @@ point of the old build with a prefix that skips the body and returns the default
 * every iterator and async state machine `MoveNext`, so coroutines end on their next step and pending async work stops;
 * every method of its injected Il2Cpp classes and (on Mono) its components, until their instances are gone.
 
-Delegates handed to a hook constructor (MonoMod, `NativeHook`) are left alone: a hook HotReload could not dispose keeps
-calling working old code instead of a handler that returns defaults.
+Delegates handed to a hook constructor (MonoMod, `NativeHook`) are left alone: a hook HotReload could not dispose (a
+`NativeDetour` or `NativeHook` not kept in a field) keeps calling working old code instead of a handler that returns
+defaults.
 
 Typical mods have 0-15 such methods; large UI mods a few hundred. Retiring is skipped, with a log line, when a mod that
 references the old build is not reloaded with it.
@@ -71,6 +87,14 @@ method would still run if called.
   some are stripped in IL2CPP games and cannot be hooked. Bundles in the old build's fields are found as well, including a
   mod's own wrapper type named `...AssetBundle` with an `Unload(bool)` method. They are unloaded with
   `Unload(false)`, so objects already created from them stay intact.
+* **MonoMod hooks**: HotReload subscribes to MonoMod's `Hook.OnDetour`, `Detour.OnDetour` and `ILHook.OnDetour` before
+  mods load and records each hook with its handler method; a hook whose handler is in the old build is disposed. Hooks
+  made before that are found in MonoMod's own registry (`Detour._DetourMap`, `ILHook._Map`).
+* **Created assets and GameObjects**: postfixes on the constructors of `Texture2D`, `RenderTexture`, `Material`, `Mesh`,
+  `Cubemap`, `Texture3D`, `Texture2DArray` and `GameObject`, and on `Sprite.Create` and `ScriptableObject.CreateInstance`,
+  record the calling mod from the call stack. On IL2CPP the game creates its objects natively and never calls these, and
+  the `(IntPtr)` wrapper constructor Il2CppInterop uses for existing objects is not hooked. Generic methods
+  (`CreateInstance<T>`) cannot be hooked; on Mono they call the non-generic one.
 * **Hooks and bundles in fields**: static fields of the old build's types and instance fields of its melons, also inside
   arrays, lists and dictionaries. Only fields whose declared type can hold such an object are read, so no unrelated static
   constructor of the old build runs.
@@ -94,7 +118,8 @@ and patches only the game, the runtime and the mods.
 | Remove MelonLoader event subscriptions of the old build (public `GetSubscribers` / `Unsubscribe`) | Unregistering removes only a registered melon's own callbacks. A melon whose `OnEarlyInitializeMelon` throws keeps its callbacks subscribed. |
 | Preference categories found through the old build's fields | `CreateEntry` throws on duplicates. Recording who creates a category would need a hook on MelonLoader, which PatchShield blocks. |
 | Reflective categories matched by their private `SystemType` | `CreateCategory<T>` makes a new category on every call. |
-| Postfix on `RuntimeAssembly.Location`, re-applied when it stops working | Assemblies loaded from bytes report an empty location; the getter is precompiled runtime code that the tiered JIT can recompile without the patch. |
+| Postfix on `RuntimeAssembly.Location`, installed once mods are loaded and re-applied when it stops working | Mods load from shadow copies, which would be their `Location`. The getter is precompiled runtime code that the tiered JIT can recompile without the patch. Patched before MelonLoader loads mods (which calls `Location` in a burst), it crashed .NET 6's tiered JIT on cold starts, so it waits for `OnInitializeMelon`. |
+| Il2CppInterop's logger muted while the constructor postfixes go in | Il2CppInterop first tries a native patch for an interop method and logs a warning for each constructor it cannot patch that way, then falls back to a managed patch that works. |
 | Remove old names from `ClassInjector.InjectedTypes` and `InjectorHelpers.s_ClassNameLookup` (Il2CppInterop) | Both reject a second injected class with the same full name. |
 | Unity and Il2CppInterop only through reflection | One net472 DLL for both runtimes, built without a game. The types are looked up in the game's Unity modules or the interop assemblies, which carry the same names. |
 | Own watcher for `HotReload.toml` | MelonLoader's preferences watcher misses rename-style saves and swallows the first change after a save. |
@@ -106,13 +131,15 @@ warning at startup; the rest keeps working.
 
 | File | What |
 |---|---|
-| `src/HotReloadPlugin.cs` | Settings, file watchers, the reload key loop. |
-| `src/Reloader.cs` | Groups, unload and load, dependents, Harmony cleanup, failed reloads. |
+| `src/HotReloadPlugin.cs` | Settings, file watchers, the reload keys, the batch queue. |
+| `src/Reloader.cs` | Batch order, groups, unload and load, dependents, Harmony cleanup, failed reloads. |
+| `src/Api.cs` | The public API. |
+| `src/CreatedObjects.cs`, `src/QuitFallback.cs` | Created assets and GameObjects; `OnApplicationQuit` on unload. |
 | `src/StartupLoader.cs` | Shadow copy of `Mods/`, `Assembly.Location`. |
 | `src/LoadContexts.cs` | The emitted `AssemblyLoadContext` (IL2CPP). |
 | `src/Retirer.cs` | Retiring the old build; hook handler detection. |
 | `src/FieldScan.cs` | Objects the old build holds in fields. |
-| `src/AssetBundles.cs`, `src/ForeignHooks.cs` | Bundle tracking and unloading; disposing hooks outside Harmony. |
+| `src/AssetBundles.cs`, `src/ForeignHooks.cs` | Bundle tracking and unloading; recording and disposing hooks outside Harmony. |
 | `src/MelonEventCleanup.cs` | MelonLoader event subscriptions of old builds. |
 | `src/PrefOwnership.cs`, `src/StateHandoff.cs` | Preferences; state handoff. |
 | `src/InjectedTypes.cs` | Il2Cpp class re-injection. |

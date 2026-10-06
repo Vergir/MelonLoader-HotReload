@@ -94,6 +94,39 @@ internal static class AssemblyMeta
         return _resolver;
     }
 
+    /// <summary>
+    /// What MelonLoader sorts melons by at startup: [MelonPriority] (lower first) and the names the assembly depends on
+    /// (assembly references, [MelonAdditionalDependencies], [MelonOptionalDependencies]). False for unreadable files.
+    /// </summary>
+    public static bool TryReadLoadOrder(byte[] bytes, out string name, out int priority, out List<string> dependsOn)
+    {
+        name = ""; priority = 0; dependsOn = new List<string>();
+        try
+        {
+            using var asm = AssemblyDefinition.ReadAssembly(new MemoryStream(bytes));
+            name = asm.Name.Name;
+            dependsOn.AddRange(asm.MainModule.AssemblyReferences.Select(r => AsmNames.Strip(r.Name)));
+            foreach (var a in asm.CustomAttributes)
+            {
+                switch (a.AttributeType.FullName)
+                {
+                    case "MelonLoader.MelonPriorityAttribute":
+                        if (a.ConstructorArguments.Count > 0 && a.ConstructorArguments[0].Value is int p) priority = p;
+                        break;
+                    case "MelonLoader.MelonAdditionalDependenciesAttribute":
+                    case "MelonLoader.MelonOptionalDependenciesAttribute":
+                        foreach (var arg in a.ConstructorArguments)
+                            if (arg.Value is CustomAttributeArgument[] names)
+                                dependsOn.AddRange(names.Select(n => n.Value as string).Where(n => !string.IsNullOrEmpty(n)).Select(n => AsmNames.Strip(n!)));
+                        break;
+                }
+            }
+            name = AsmNames.Strip(name);
+            return name.Length > 0;
+        }
+        catch { return false; }
+    }
+
     public static List<string> ReferencedNames(byte[] bytes)
     {
         try

@@ -22,7 +22,7 @@ The test mods in `tests/` compile against a real game (`GameDir` / `MonoGameDir`
 | Mod | Deploys to | Exercises |
 |---|---|---|
 | `HRTestLib` | `UserLibs/` | A library that refuses a second registration: works only if it reloads with the mod. |
-| `HRTestBase` | `Mods/` | A second Harmony instance, a reflective and a plainly named preference category, scene callbacks, a `DontDestroyOnLoad` object, an endless coroutine, a timer, an injected `MonoBehaviour`, two AssetBundles (one kept in a field, one dropped), two MonoMod hooks (one kept, one dropped), state handoff. It cleans up none of them itself. |
+| `HRTestBase` | `Mods/` | A second Harmony instance, a reflective and a plainly named preference category, scene callbacks, a `DontDestroyOnLoad` object, an endless coroutine, a timer, an injected `MonoBehaviour`, two AssetBundles (one kept in a field, one dropped), two MonoMod hooks (one kept, one dropped), two textures (one kept, one dropped), `OnApplicationQuit` without `OnDeinitializeMelon`, state handoff, the `HotReload.Api` events. It cleans up none of them itself. With a file `UserData/HRTestBlockInput` it also blocks `Input.GetKeyDown` like a mod with an open window. |
 | `HRTestDependent` | `Mods/HRTestSub/` | References `HRTestBase`, from a manifest subfolder (create it with a `manifest.json`). |
 | `HRTestPlugin` | `Plugins/` | A plugin; also the hook target (`Probe()`, logged every 3 seconds). |
 

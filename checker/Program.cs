@@ -77,7 +77,7 @@ internal static class Program
 
 internal enum MelonKind { Mod, Plugin, UnknownMelon, Library }
 internal enum Flavor { Il2CppInterop, Unhollower, Mono, Unknown }
-internal enum Severity { Info, Cleanup, Blocker }
+internal enum Severity { Info, Review, Cleanup, Blocker }
 
 internal sealed record MemberRef(string Type, string Member, string Scope, bool GenericMethod)
 {
@@ -100,6 +100,9 @@ internal sealed class ModScan
     public List<TypeDef> TypeDefs = new();
     public HashSet<string> DefinedMethods = new(StringComparer.Ordinal); // method names defined anywhere in the assembly
     public HashSet<string> FieldTypes = new(StringComparer.Ordinal);     // every type named in a field signature (incl. generic arguments)
+    public HashSet<string> TypeRefs = new(StringComparer.Ordinal);       // every type referenced from another assembly
+    public HashSet<string> MelonMethods = new(StringComparer.Ordinal);   // methods defined on the melon type and its bases in this assembly
+    public List<string> InputPatches = new();                            // Harmony patches on UnityEngine.Input (attributes, or typeof(Input) next to Harmony calls)
     public bool LooksObfuscated;
 
     public static ModScan? Read(string path)
@@ -116,6 +119,7 @@ internal sealed class ModScan
         s.AssemblyVersion = def.Version.ToString();
 
         foreach (var h in md.AssemblyReferences) s.AssemblyRefs.Add(md.GetString(md.GetAssemblyReference(h).Name));
+        foreach (var h in md.TypeReferences) s.TypeRefs.Add(Names.Of(md, h).type);
 
         foreach (var h in md.MemberReferences)
         {
@@ -135,6 +139,7 @@ internal sealed class ModScan
 
         int weird = 0;
         var typeBases = new Dictionary<string, string?>(StringComparer.Ordinal);
+        var typeMethods = new Dictionary<string, List<string>>(StringComparer.Ordinal);
         foreach (var h in md.TypeDefinitions)
         {
             var td = md.GetTypeDefinition(h);
@@ -145,7 +150,9 @@ internal sealed class ModScan
             s.TypeDefs.Add(new TypeDef(name, baseName, baseScope));
             typeBases[name] = baseName;
             if (md.GetString(td.Name).Any(c => c > 0x7e || char.IsControl(c))) weird++;
-            foreach (var mh in td.GetMethods()) s.DefinedMethods.Add(md.GetString(md.GetMethodDefinition(mh).Name));
+            var methods = typeMethods[name] = new List<string>();
+            foreach (var mh in td.GetMethods()) methods.Add(md.GetString(md.GetMethodDefinition(mh).Name));
+            s.DefinedMethods.UnionWith(methods);
             var names = new NameCollector(md, s.FieldTypes);
             foreach (var fh in td.GetFields())
             {
@@ -188,10 +195,13 @@ internal sealed class ModScan
             {
                 if (cur == "MelonLoader.MelonMod") { s.Kind = MelonKind.Mod; break; }
                 if (cur == "MelonLoader.MelonPlugin") { s.Kind = MelonKind.Plugin; break; }
+                if (typeMethods.TryGetValue(cur, out var ms)) s.MelonMethods.UnionWith(ms);
                 cur = typeBases.TryGetValue(cur, out var b) ? b : null;
             }
         }
         else if (s.AttributeTypes.Contains("MelonLoader.MelonInfoAttribute")) s.Kind = MelonKind.UnknownMelon;
+
+        InputPatchScan.Run(pe, md, s);
 
         // MelonLoader 0.6+ uses .NET 6 only for IL2CPP games; Mono games run net35/net472/netstandard mods.
         bool unhollower = s.AssemblyRefs.Contains("UnhollowerBaseLib") || s.AssemblyRefs.Contains("UnhollowerRuntimeLib");
@@ -203,6 +213,144 @@ internal sealed class ModScan
             : Flavor.Unknown;
         return s;
     }
+}
+
+/// <summary>
+/// Finds Harmony patches on UnityEngine.Input: [HarmonyPatch(typeof(Input), ...)] attributes, and method bodies that load
+/// typeof(Input) together with a Harmony call (AccessTools.Method, harmony.Patch) or inside TargetMethod(s), or together
+/// with a key-reading member name when the mod uses Harmony at all.
+/// </summary>
+internal static class InputPatchScan
+{
+    private const string InputType = "UnityEngine.Input";
+
+    /// <summary>Input members that read keys or buttons (what a patch would use to swallow a key press).</summary>
+    public static bool IsKeyMember(string name) => KeyMembers.Contains(name.StartsWith("get_", StringComparison.Ordinal) ? name.Substring(4) : name);
+
+    private static readonly HashSet<string> KeyMembers = new(StringComparer.Ordinal)
+    {
+        "GetKey", "GetKeyDown", "GetKeyUp", "GetButton", "GetButtonDown", "GetButtonUp", "GetAxis", "GetAxisRaw", "anyKey", "anyKeyDown",
+    };
+
+    private static bool IsInput(string typeName) => typeName == InputType;
+
+    /// <summary>A System.Type argument in a custom attribute blob is its serialized name: "UnityEngine.Input, UnityEngine.InputLegacyModule, ...".</summary>
+    private static bool IsInputTypeArg(object? value) =>
+        value is string v && (v == InputType || v.StartsWith(InputType + ",", StringComparison.Ordinal));
+
+    public static void Run(PEReader pe, MetadataReader md, ModScan s)
+    {
+        // 1) Attributes: [HarmonyPatch(typeof(Input), "GetKeyDown")] on a class or method; a class-level typeof(Input) with the
+        //    member named on a method-level [HarmonyPatch("GetKeyDown")] counts too (both are reported as the class).
+        foreach (var h in md.CustomAttributes)
+        {
+            var ca = md.GetCustomAttribute(h);
+            var t = Names.AttributeType(md, ca);
+            if (t == null || !t.EndsWith(".HarmonyPatch", StringComparison.Ordinal)) continue;
+            ImmutableArray<CustomAttributeTypedArgument<string>> args;
+            try { args = ca.DecodeValue(new AttrTypeProvider()).FixedArguments; }
+            catch { continue; }
+            if (!args.Any(a => IsInputTypeArg(a.Value))) continue;
+            var member = args.Select(a => a.Value as string).FirstOrDefault(v => v != null && !IsInputTypeArg(v));
+            string owner = ca.Parent.Kind switch
+            {
+                HandleKind.TypeDefinition => Names.Of(md, (TypeDefinitionHandle)ca.Parent),
+                HandleKind.MethodDefinition => MethodName(md, (MethodDefinitionHandle)ca.Parent),
+                _ => "?",
+            };
+            s.InputPatches.Add($"[HarmonyPatch(typeof({InputType}){(member != null ? ", \"" + member + "\"" : "")})] on {owner}");
+        }
+
+        // 2) IL: typeof(Input) next to Harmony calls.
+        bool usesHarmony = s.AssemblyRefs.Any(r => r.Contains("Harmony", StringComparison.OrdinalIgnoreCase));
+        if (!usesHarmony) return;
+        foreach (var mh in md.MethodDefinitions)
+        {
+            var mdef = md.GetMethodDefinition(mh);
+            if (mdef.RelativeVirtualAddress == 0) continue;
+            MethodBodyBlock body;
+            try { body = pe.GetMethodBody(mdef.RelativeVirtualAddress); }
+            catch { continue; }
+            bool loadsInput = false, harmonyCall = false;
+            var keyNames = new List<string>();
+            try
+            {
+                var il = body.GetILReader();
+                while (il.RemainingBytes > 0)
+                {
+                    var op = IL.ReadOpCode(ref il);
+                    if (op == ILOpCode.Ldtoken)
+                    {
+                        var tok = MetadataTokens.EntityHandle(il.ReadInt32());
+                        if (tok.Kind is HandleKind.TypeReference or HandleKind.TypeDefinition && IsInput(Names.Parent(md, tok).type)) loadsInput = true;
+                    }
+                    else if (op is ILOpCode.Call or ILOpCode.Callvirt or ILOpCode.Newobj)
+                    {
+                        var type = IL.CalleeType(md, MetadataTokens.EntityHandle(il.ReadInt32()));
+                        if (type.StartsWith("HarmonyLib.", StringComparison.Ordinal) || type.StartsWith("Harmony.", StringComparison.Ordinal)) harmonyCall = true;
+                    }
+                    else if (op == ILOpCode.Ldstr)
+                    {
+                        var str = md.GetUserString(MetadataTokens.UserStringHandle(il.ReadInt32()));
+                        if (IsKeyMember(str)) keyNames.Add(str);
+                    }
+                    else IL.SkipOperand(ref il, op);
+                }
+            }
+            catch { continue; } // malformed or obfuscated body
+            if (!loadsInput) continue;
+            var name = md.GetString(mdef.Name);
+            bool targetMethod = name is "TargetMethod" or "TargetMethods";
+            if (!(harmonyCall || targetMethod || keyNames.Count > 0)) continue;
+            s.InputPatches.Add($"typeof({InputType})" + (keyNames.Count > 0 ? " \"" + string.Join("\", \"", keyNames.Distinct()) + "\"" : "") +
+                               " in " + MethodName(md, mh));
+        }
+    }
+
+    private static string MethodName(MetadataReader md, MethodDefinitionHandle h)
+    {
+        var m = md.GetMethodDefinition(h);
+        return Names.Of(md, m.GetDeclaringType()) + "::" + md.GetString(m.Name);
+    }
+}
+
+/// <summary>Just enough of an IL reader to walk a method body: opcodes and operand sizes.</summary>
+internal static class IL
+{
+    private static readonly Dictionary<short, System.Reflection.Emit.OperandType> Operands =
+        typeof(System.Reflection.Emit.OpCodes).GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+            .Select(f => (System.Reflection.Emit.OpCode)f.GetValue(null)!)
+            .GroupBy(o => o.Value).ToDictionary(g => g.Key, g => g.First().OperandType);
+
+    public static ILOpCode ReadOpCode(ref BlobReader il)
+    {
+        int b = il.ReadByte();
+        return (ILOpCode)(b == 0xFE ? 0xFE00 | il.ReadByte() : b);
+    }
+
+    public static void SkipOperand(ref BlobReader il, ILOpCode op)
+    {
+        if (!Operands.TryGetValue(unchecked((short)op), out var t)) throw new BadImageFormatException("unknown opcode " + op);
+        switch (t)
+        {
+            case System.Reflection.Emit.OperandType.InlineNone: break;
+            case System.Reflection.Emit.OperandType.ShortInlineBrTarget or System.Reflection.Emit.OperandType.ShortInlineI or System.Reflection.Emit.OperandType.ShortInlineVar:
+                il.Offset += 1; break;
+            case System.Reflection.Emit.OperandType.InlineVar: il.Offset += 2; break;
+            case System.Reflection.Emit.OperandType.InlineI8 or System.Reflection.Emit.OperandType.InlineR: il.Offset += 8; break;
+            case System.Reflection.Emit.OperandType.InlineSwitch: il.Offset += 4 * il.ReadInt32(); break;
+            default: il.Offset += 4; break; // tokens, InlineI, ShortInlineR, InlineBrTarget
+        }
+    }
+
+    /// <summary>Declaring type of a call target (MethodDef, MemberRef or MethodSpec).</summary>
+    public static string CalleeType(MetadataReader md, EntityHandle h) => h.Kind switch
+    {
+        HandleKind.MethodDefinition => Names.Of(md, md.GetMethodDefinition((MethodDefinitionHandle)h).GetDeclaringType()),
+        HandleKind.MemberReference => Names.Parent(md, md.GetMemberReference((MemberReferenceHandle)h).Parent).type,
+        HandleKind.MethodSpecification => CalleeType(md, md.GetMethodSpecification((MethodSpecificationHandle)h).Method),
+        _ => "?",
+    };
 }
 
 internal static class Names
@@ -390,6 +538,16 @@ internal static class Rules
                 ? "Handled: HotReload disposes the hooks the old build keeps in fields. A hook not kept in a field keeps calling the old build; dispose those in OnDeinitializeMelon."
                 : "The hooks are not kept in a field, so HotReload cannot find them: they keep calling the old build after a reload. Keep them in a field (HotReload disposes it) or dispose them in OnDeinitializeMelon.",
             hookRefs);
+        // Review only: often harmless (the new build sets it again), so it never makes a mod NEEDS CLEANUP.
+        if (!s.DefinedMethods.Contains("OnDeinitializeMelon"))
+            Add("globalstate", Severity.Review, "Changes global Unity state",
+                "HotReload does not restore it: what the old build set (a hidden or locked cursor, a time scale, a frame rate cap, " +
+                "the current EventSystem) stays after a reload or unload. Undo it in OnDeinitializeMelon.",
+                Refs(m => (m.Type == "UnityEngine.EventSystems.EventSystem" && m.Member == "set_current") ||
+                          (m.Type == "UnityEngine.Cursor" && m.Member is "set_lockState" or "set_visible") ||
+                          (m.Type == "UnityEngine.Time" && m.Member == "set_timeScale") ||
+                          (m.Type == "UnityEngine.Application" && m.Member == "set_targetFrameRate") ||
+                          (m.Type == "UnityEngine.QualitySettings" && (m.Member.StartsWith("set_") || m.Member == "SetQualityLevel"))));
         Add("threads", Severity.Cleanup, "Starts its own threads",
             "A loop already running on a thread keeps running after a reload; retiring only stops later calls. Signal it to stop in OnDeinitializeMelon.",
             Refs(m => m.Type == "System.Threading.Thread" && m.Member == ".ctor"));
@@ -401,10 +559,24 @@ internal static class Rules
         Add("persistent", Severity.Info, "Keeps objects across scenes (DontDestroyOnLoad)",
             "Handled: HotReload destroys the objects the old build passed to DontDestroyOnLoad.",
             Refs(m => m.Type == "UnityEngine.Object" && m.Member == "DontDestroyOnLoad"));
-        Add("objects", Severity.Info, "Creates GameObjects / components",
+        Add("objects", Severity.Info, "Creates GameObjects (new GameObject)",
+            "The old build's objects stay until their scene unloads; DontDestroyOnLoad ones are destroyed (see persistent). HotReload " +
+            "destroys the rest only with DestroyOldGameObjects on (default off). Otherwise destroy them in OnDeinitializeMelon, or find and reuse them.",
+            Refs(m => m.Type == "UnityEngine.GameObject" && m.Member == ".ctor"));
+        Add("components", Severity.Info, "Adds components / instantiates objects",
             "Handled for the common case: objects in normal scenes go away with the scene. Components added to objects the game keeps stay until then.",
-            Refs(m => (m.Type == "UnityEngine.GameObject" && (m.Member == ".ctor" || m.Member == "AddComponent")) ||
+            Refs(m => (m.Type == "UnityEngine.GameObject" && m.Member == "AddComponent") ||
                       (m.Type == "UnityEngine.Object" && m.Member == "Instantiate")));
+        Add("assets", Severity.Info, "Creates Unity assets (textures, materials, meshes, sprites, ScriptableObjects)",
+            "Handled: HotReload destroys the old build's assets on reload (setting DestroyOldAssets). An asset handed to the game " +
+            "(an icon registered in a game database, a material on a game object) goes blank until the new build registers its own.",
+            Refs(m => (m.Member == ".ctor" && m.Type is "UnityEngine.Texture2D" or "UnityEngine.RenderTexture" or "UnityEngine.Material" or "UnityEngine.Mesh" or "UnityEngine.Cubemap") ||
+                      (m.Type == "UnityEngine.Sprite" && m.Member == "Create") ||
+                      (m.Type == "UnityEngine.ScriptableObject" && m.Member == "CreateInstance")));
+        Add("uitoolkit", Severity.Info, "Uses UI Toolkit (UIDocument / PanelSettings)",
+            "A panel the old build left stays on screen until its GameObject is destroyed (see objects and persistent). PanelSettings is a " +
+            "ScriptableObject: made with CreateInstance, it is destroyed with the other assets (see assets).",
+            s.TypeRefs.Where(t => t is "UnityEngine.UIElements.UIDocument" or "UnityEngine.UIElements.PanelSettings"));
         Add("callbacks", Severity.Info, "Hands callbacks to the game",
             "Handled: the old build's delegate targets are retired, so leftover listeners and settings rows do nothing until the game rebuilds that UI.",
             Refs(m => (m.Member == "AddListener" && m.Type.StartsWith("UnityEngine.Events.UnityEvent")) ||
@@ -412,7 +584,8 @@ internal static class Rules
                       (m.Member == "op_Implicit" && m.Type.StartsWith("Il2CppSystem.") && (m.Type.Contains("Action") || m.Type.Contains("Func") || m.Type.Contains("Predicate") || m.Type.Contains("Comparison"))) ||
                       (m.Member.StartsWith("add_") && Il2CppScope(m.Scope))));
         Add("timers", Severity.Info, "Timers, tasks, thread-pool work or file watchers",
-            "Handled: their callbacks and async steps in the old build are retired.",
+            "Handled: their callbacks and async steps in the old build are retired. Work already in flight (an HttpClient request, " +
+            "file IO) still runs to its end, and work the old build queued for the main thread is dropped.",
             Refs(m => (m.Type is "System.Threading.Timer" or "System.Timers.Timer" or "System.IO.FileSystemWatcher" && m.Member == ".ctor") ||
                       (m.Type == "System.Threading.Tasks.Task" && m.Member == "Run") ||
                       (m.Type == "System.Threading.Tasks.TaskFactory" && m.Member == "StartNew") ||
@@ -428,8 +601,18 @@ internal static class Rules
             "Handled: HotReload saves and drops the old category before the reload.",
             Refs(m => m.Type == "MelonLoader.MelonPreferences" && m.Member == "CreateCategory" && m.GenericMethod));
         Add("location", Severity.Info, "Reads Assembly.Location",
-            "Handled: HotReload makes Assembly.Location return the DLL path for mods loaded from memory.",
+            "Handled once all mods have loaded: HotReload's PatchAssemblyLocation patch makes it return the Mods/ path. Code that runs " +
+            "while mods load (the mod's OnEarlyInitializeMelon, static initialisers) sees the shadow-copy path. Prefer " +
+            "MelonEnvironment.ModsDirectory or MelonAssembly.Location.",
             Refs(m => m.Type == "System.Reflection.Assembly" && m.Member == "get_Location"));
+        Add("inputpatch", Severity.Info, "Patches UnityEngine.Input",
+            "May swallow the reload key. Handled: HotReload reads its key through an unpatched path.",
+            s.InputPatches);
+        if (!s.MelonMethods.Contains("OnDeinitializeMelon"))
+            Add("quitonly", Severity.Info, "Saves or cleans up only on quit (OnApplicationQuit, no OnDeinitializeMelon)",
+                "Handled: HotReload calls OnApplicationQuit when it reloads or unloads such a melon (setting CallQuitOnUnload). " +
+                "Prefer OnDeinitializeMelon: it runs on reload, unload and quit.",
+                s.MelonMethods.Contains("OnApplicationQuit") ? new[] { MelonTypeName(s) + "::OnApplicationQuit" } : Array.Empty<string>());
         Add("scenes", Severity.Info, "Scene callbacks",
             "Handled: HotReload replays OnSceneWasLoaded/OnSceneWasInitialized for scenes already open after a reload.",
             new[] { "OnSceneWasLoaded", "OnSceneWasInitialized" }.Where(s.DefinedMethods.Contains));
@@ -444,10 +627,14 @@ internal static class Rules
             s.Kind == MelonKind.Library ? "LIBRARY" :
             s.Flavor == Flavor.Unhollower ? "UNSUPPORTED (MelonLoader 0.5 era)" :
             findings.Any(f => f.Severity == Severity.Blocker) ? "BLOCKED" :
-            !findings.Any(f => f.Severity == Severity.Cleanup) ? "READY" :
-            hasDeinit ? "REVIEW" : "NEEDS CLEANUP";
+            findings.Any(f => f.Severity == Severity.Cleanup) ? (hasDeinit ? "REVIEW" : "NEEDS CLEANUP") :
+            findings.Any(f => f.Severity == Severity.Review) ? "REVIEW" :
+            "READY";
         return new Report(s, verdict, findings, deps);
     }
+
+    private static string MelonTypeName(ModScan s) =>
+        s.MelonType.Length > 0 ? s.MelonType.Split(',')[0].Trim() : s.MelonName.Length > 0 ? s.MelonName : s.AssemblyName;
 
     /// <summary>Il2Cpp-mod types that derive from interop types but are not injected (attributes, exceptions are managed-only).</summary>
     private static bool IsManagedOnlyBase(string baseType) =>
@@ -459,7 +646,7 @@ internal static class Output
     private static readonly Dictionary<string, string> Legend = new()
     {
         ["READY"] = "nothing found that HotReload cannot clean up; should hot-reload as is",
-        ["REVIEW"] = "uses something HotReload cannot clean up, but has OnDeinitializeMelon; check it undoes it",
+        ["REVIEW"] = "uses something HotReload cannot clean up, but has OnDeinitializeMelon (check it undoes it), or changes global state without one (check it needs undoing)",
         ["NEEDS CLEANUP"] = "uses something HotReload cannot clean up and has no OnDeinitializeMelon; author must add cleanup",
 
         ["BLOCKED"] = "uses something HotReload cannot reload",
@@ -473,16 +660,16 @@ internal static class Output
         sb.AppendLine("# HotReload compatibility report");
         sb.AppendLine();
         sb.AppendLine("Static scan of compiled DLLs (metadata only), against HotReload " + Program.HotReloadVersion + ". \"Cleanup\" findings are things HotReload cannot undo itself; " +
-                      "whether the mod's OnDeinitializeMelon undoes them needs a look at the code or a test.");
+                      "whether the mod's OnDeinitializeMelon undoes them needs a look at the code or a test. \"Review\" findings may need undoing; they never make a mod NEEDS CLEANUP.");
         sb.AppendLine();
         sb.AppendLine("| Mod | Version | Author | Kind | Verdict | Cleanup items | Handled | Depends on |");
         sb.AppendLine("|---|---|---|---|---|---|---|---|");
         foreach (var r in reports.OrderBy(r => r.Rank).ThenBy(r => r.Scan.MelonName, StringComparer.OrdinalIgnoreCase))
         {
             var s = r.Scan;
-            string Ids(Severity sev) => string.Join(", ", r.Findings.Where(f => f.Severity == sev).Select(f => f.Id));
+            string Ids(Func<Severity, bool> sev) => string.Join(", ", r.Findings.Where(f => sev(f.Severity)).OrderByDescending(f => f.Severity).Select(f => f.Id));
             sb.AppendLine($"| {Esc(s.MelonName.Length > 0 ? s.MelonName : s.AssemblyName)} | {Esc(s.MelonVersion)} | {Esc(s.MelonAuthor)} | {s.Kind} | **{r.Verdict}** | " +
-                          $"{Ids(Severity.Blocker)}{(Ids(Severity.Blocker).Length > 0 && Ids(Severity.Cleanup).Length > 0 ? ", " : "")}{Ids(Severity.Cleanup)} | {Ids(Severity.Info)} | {Esc(string.Join(", ", r.Dependencies))} |");
+                          $"{Ids(v => v != Severity.Info)} | {Ids(v => v == Severity.Info)} | {Esc(string.Join(", ", r.Dependencies))} |");
         }
         sb.AppendLine();
         sb.AppendLine("Verdicts:");
@@ -502,7 +689,7 @@ internal static class Output
             if (r.Findings.Count == 0) sb.AppendLine("No findings.");
             foreach (var f in r.Findings.OrderByDescending(f => f.Severity))
             {
-                var tag = f.Severity switch { Severity.Blocker => "BLOCKER", Severity.Cleanup => "cleanup", _ => "handled" };
+                var tag = f.Severity switch { Severity.Blocker => "BLOCKER", Severity.Cleanup => "cleanup", Severity.Review => "review", _ => "handled" };
                 var ev = string.Join(", ", f.Evidence.Take(6).Select(e => "`" + e + "`")) + (f.Evidence.Count > 6 ? $" (+{f.Evidence.Count - 6} more)" : "");
                 sb.AppendLine($"- **{tag}: {f.Title}.** {f.Advice} Evidence: {ev}");
             }
@@ -519,11 +706,11 @@ internal static class Output
         foreach (var r in reports)
         {
             var s = r.Scan;
-            string Ids(Severity sev) => string.Join(" ", r.Findings.Where(f => f.Severity == sev).Select(f => f.Id));
+            string Ids(params Severity[] sev) => string.Join(" ", r.Findings.Where(f => sev.Contains(f.Severity)).Select(f => f.Id));
             sb.AppendLine(string.Join(",", new[]
             {
                 Path.GetFileName(s.Path), s.AssemblyName, s.MelonName, s.MelonVersion, s.MelonAuthor, s.Kind.ToString(), s.Flavor.ToString(), r.Verdict,
-                s.DefinedMethods.Contains("OnDeinitializeMelon") ? "yes" : "no", Ids(Severity.Blocker), Ids(Severity.Cleanup), Ids(Severity.Info), string.Join(" ", r.Dependencies),
+                s.DefinedMethods.Contains("OnDeinitializeMelon") ? "yes" : "no", Ids(Severity.Blocker), Ids(Severity.Cleanup, Severity.Review), Ids(Severity.Info), string.Join(" ", r.Dependencies),
             }.Select(CsvCell)));
         }
         return sb.ToString();

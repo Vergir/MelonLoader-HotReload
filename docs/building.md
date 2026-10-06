@@ -53,7 +53,7 @@ release can be checked against the source:
 2. Clone the release's tag and build the zips:
 
    ```bash
-   git clone --branch v1.1.1 https://github.com/vergir/MelonLoader-HotReload
+   git clone --branch v1.2.0 https://github.com/vergir/MelonLoader-HotReload
    cd MelonLoader-HotReload
    pwsh ./package.ps1
    ```

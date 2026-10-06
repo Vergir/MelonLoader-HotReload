@@ -60,6 +60,7 @@ internal static class UnityApi
         public readonly Type Object, GameObject, Component;
         public readonly Type? ScriptableObject;
         public readonly MethodInfo Destroy, Exists, FindObjectsOfTypeAll, DontDestroyOnLoad, SceneCount, GetSceneAt;
+        public readonly MethodInfo? GetActiveScene;
         public readonly PropertyInfo ComponentGameObject, SceneIsLoaded, SceneBuildIndex, SceneName;
 
         public Core()
@@ -83,6 +84,7 @@ internal static class UnityApi
             var sceneManager = Need("UnityEngine.SceneManagement.SceneManager", CoreModules);
             SceneCount = sceneManager.GetProperty("sceneCount", PublicStatic)?.GetGetMethod() ?? throw new MissingMemberException(sceneManager.FullName, "sceneCount");
             GetSceneAt = NeedMethod(sceneManager, "GetSceneAt", typeof(int));
+            GetActiveScene = sceneManager.GetMethod("GetActiveScene", PublicStatic, null, Type.EmptyTypes, null);
             var scene = GetSceneAt.ReturnType;
             SceneIsLoaded = scene.GetProperty("isLoaded", PublicInstance) ?? throw new MissingMemberException(scene.FullName, "isLoaded");
             SceneBuildIndex = scene.GetProperty("buildIndex", PublicInstance) ?? throw new MissingMemberException(scene.FullName, "buildIndex");
@@ -151,6 +153,14 @@ internal static class UnityApi
         catch { return false; }
     }
 
+    /// <summary>Destroys a Unity object that is still alive. True when it was alive.</summary>
+    public static bool DestroyIfAlive(object obj)
+    {
+        if (!IsAlive(obj)) return false;
+        U.Destroy.Invoke(null, new[] { obj });
+        return true;
+    }
+
     /// <summary>
     /// For objects that may or may not be Unity objects (a mod's own wrapper around a native object): alive when it is a
     /// live Unity object, or not a Unity object and not a collected Il2Cpp object.
@@ -212,8 +222,63 @@ internal static class UnityApi
     {
         if (key == NoKey) return false;
         if ((_getKeyDown == null || _getKey == null) && LegacyInputProblem() is { } problem) throw new InvalidOperationException(problem);
-        try { return (bool)method!.Invoke(null, Args(key))!; }
+        try { return (bool)Unpatched(method!).Invoke(null, Args(key))!; }
         catch (TargetInvocationException e) when (e.InnerException != null) { throw e.InnerException; }
+    }
+
+    // Another mod may patch Input.GetKey / GetKeyDown, e.g. to block game input while its window is open, which would
+    // swallow the reload key. While someone has patched them:
+    //  - Mono: the key is read through copies of the original methods (MonoMod's DynamicMethodDefinition, which Harmony
+    //    itself uses; built from the method's IL, so without patches).
+    //  - IL2CPP: Il2CppInterop patches the game's native method, which a managed copy still calls, so KeyInput reads the
+    //    key another way (LegacyInputBlocked).
+    private static readonly Dictionary<MethodInfo, MethodInfo?> UnpatchedCopies = new Dictionary<MethodInfo, MethodInfo?>();
+    private static int _patchCheckIn;
+    private static bool _inputPatched;
+
+    private static bool InputPatched()
+    {
+        if (--_patchCheckIn <= 0)
+        {
+            _patchCheckIn = 30; // patches come and go (a mod's window opens); a look every 30 calls is enough
+            _inputPatched = IsPatched(_getKeyDown) || IsPatched(_getKey);
+        }
+        return _inputPatched;
+    }
+
+    /// <summary>IL2CPP: another mod patched Input.GetKey / GetKeyDown, so legacy input cannot be trusted for the reload key right now.</summary>
+    public static bool LegacyInputBlocked() => !Compat.IsMono && InputPatched();
+
+    private static MethodInfo Unpatched(MethodInfo method)
+    {
+        if (!Compat.IsMono || !InputPatched()) return method;
+        if (!UnpatchedCopies.TryGetValue(method, out var copy)) UnpatchedCopies[method] = copy = CopyOf(method);
+        return copy ?? method;
+    }
+
+    private static bool IsPatched(MethodInfo? method)
+    {
+        try { return method != null && HarmonyLib.Harmony.GetPatchInfo(method) is { } info && info.Owners.Count > 0; }
+        catch { return false; }
+    }
+
+    private static MethodInfo? CopyOf(MethodInfo method)
+    {
+        try
+        {
+            var dmdType = AppDomain.CurrentDomain.GetAssemblies().Select(a => a.GetType("MonoMod.Utils.DynamicMethodDefinition", false)).FirstOrDefault(t => t != null)
+                          ?? throw new TypeLoadException("MonoMod.Utils.DynamicMethodDefinition not loaded");
+            var dmd = Activator.CreateInstance(dmdType, method)!;
+            var copy = (MethodInfo)dmdType.GetMethod("Generate", Type.EmptyTypes)!.Invoke(dmd, null)!;
+            HotReloadPlugin.Log?.Msg("Another mod patched Input." + method.Name + "; the reload key reads an unpatched copy.");
+            return copy;
+        }
+        catch (Exception e)
+        {
+            HotReloadPlugin.Log?.Warning("Another mod patched Input." + method.Name + " and an unpatched copy could not be made (" + e.GetBaseException().Message +
+                                         "); the reload key may not work while that mod blocks input. InputBackend = \"Windows\" avoids it.");
+            return null;
+        }
     }
 
     /// <summary>Parses a KeyCode name. Returns false for unknown names.</summary>
@@ -243,10 +308,10 @@ internal static class UnityApi
     /// A reloaded mod never saw the scenes that are already open. Replays OnSceneWasLoaded + OnSceneWasInitialized
     /// for each loaded scene, in load order, as MelonLoader would have.
     /// </summary>
-    public static int ReplaySceneEvents(MelonMod mod)
+    public static int ReplaySceneEvents(MelonMod mod, bool activeSceneOnly)
     {
         int n = 0;
-        foreach (var (buildIndex, name) in LoadedScenes())
+        foreach (var (buildIndex, name) in activeSceneOnly ? ActiveScene() : LoadedScenes())
         {
             try { mod.OnSceneWasLoaded(buildIndex, name); }
             catch (Exception e) { mod.LoggerInstance.Error("OnSceneWasLoaded(" + name + ") during hot reload: " + e); }
@@ -255,6 +320,16 @@ internal static class UnityApi
             n++;
         }
         return n;
+    }
+
+    /// <summary>The active scene only (games that stream their world as many additive scenes); all loaded scenes if unknown.</summary>
+    private static List<(int buildIndex, string name)> ActiveScene()
+    {
+        var u = U;
+        if (u.GetActiveScene == null) return LoadedScenes();
+        var scene = u.GetActiveScene.Invoke(null, null)!; // boxed struct
+        if (!(bool)u.SceneIsLoaded.GetValue(scene, null)!) return new List<(int, string)>();
+        return new List<(int, string)> { ((int)u.SceneBuildIndex.GetValue(scene, null)!, (string)u.SceneName.GetValue(scene, null)!) };
     }
 
     private static List<(int buildIndex, string name)> LoadedScenes()
